@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import os
 
+
 #############################################
 # 1. DICTIONARIES (Complete from Spec Sheet)
 #############################################
@@ -20,7 +21,7 @@ CHARACTERISTICS = {
     },
     "Age_Elderly": {
         "vital_sign_modifiers": {
-            "BP_offset_range": (5, 10)  # +5–10 mmHg
+            "BP_offset_range": (5, 10)
         },
         "risk_modifiers": {
             "Cardiac_Ischaemia_warning": 1.5,
@@ -64,7 +65,7 @@ CHARACTERISTICS = {
 PREVIOUS_CONDITIONS = {
     "Hypertension": {
         "vital_sign_modifiers": {
-            "BP_offset_range": (10, 20)  # +10–20 mmHg
+            "BP_offset_range": (10, 20)
         },
         "risk_modifiers": {
             "Cardiac_Ischaemia_warning": 2.0,
@@ -206,15 +207,13 @@ CURRENT_CONDITIONS = {
 }
 
 
-# We won't detail every single attribute in each warning or crisis,
-# as we might apply them at runtime to the patient's vitals.
 WARNING_STATES = {
     "Cardiac_Ischaemia": {
         "HR_factor_range": (1.2, 1.5),
         "BP_offset_range": (5, 10),
         "RR_offset_range": (2, 5),
         "O2_sat_offset_range": (-2, -1),
-        "duration_range": (5,30),  # minutes
+        "duration_range": (5,30),
         "prob_escalate_crisis": 0.3,
         "maps_to_crisis": "STEMI"
     },
@@ -232,7 +231,7 @@ WARNING_STATES = {
         "RR_factor_range": (1.2, 1.5),
         "O2_sat_offset_range": (-1, 0),
         "duration_range": (10,60),
-        "prob_escalate_crisis": 0.0,  # won't escalate
+        "prob_escalate_crisis": 0.0,
         "maps_to_crisis": None
     },
     "Breathing_difficulty": {
@@ -315,6 +314,192 @@ CRISIS_STATES = {
 DEATH_STATE = "Death"
 
 
+#############################################
+# 0. STATE LIST & UPDATED TRANSITION MATRIX
+#############################################
+
+# We'll keep the same list of 17 states with integer indices 0..16.
+# The user wants a LONGER stay in warnings & crises, so let's adjust:
+#  - Warnings => ~0.95 remain in that warning, ~0.03 escalate to crisis, ~0.02 revert to neutral.
+#  - Crises => ~0.98 remain in crisis, 0.02 => death.
+#  - Neutral => lower chance to go to warning.
+
+STATE_LIST = [
+    "Neutral",                     # 0
+    "Cardiac Ischaemia",           # 1 (warning)
+    "Sepsis",                      # 2 (warning)
+    "Acute Anxiety/Panic",         # 3 (warning)
+    "Breathing Difficulty",        # 4 (warning)
+    "Hypovolaemia",                # 5 (warning)
+    "Arrhythmic Flare",            # 6 (warning)
+    "Hypoglycemia",                # 7 (warning)
+    "TIA",                         # 8 (warning)
+    "Bathroom (harmless)",         # 9
+    "White Coat (harmless)",       # 10
+    "STEMI (crisis)",              # 11
+    "Septic Shock (crisis)",       # 12
+    "Compromised Airway (crisis)", # 13
+    "Haemorrhagic Shock (crisis)", # 14
+    "Stroke (crisis)",             # 15
+    "Death"                        # 16
+]
+
+#  We'll define a matrix so that once in a warning, you usually stay in it (0.95),
+#  0.03 chance of going to the relevant crisis, and 0.02 chance returning to neutral or some distribution.
+#  For crises, 0.98 remain, 0.02 => death.
+#  For neutral, we give a small chance to jump to a warning (0.01 each).
+TRANSITION_MATRIX = [
+    # 0. Neutral -> ...
+    [0.90, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0,  0,    0,    0,    0,    0   ],
+    # 1. Cardiac Ischaemia -> ...
+    [0.02, 0.95, 0,    0,    0,    0,    0,    0,    0,    0,   0,   0.03, 0,    0,    0,    0,    0   ],
+    # 2. Sepsis -> ...
+    [0.02, 0,    0.95, 0,    0,    0,    0,    0,    0,    0,   0,   0,    0.03, 0,    0,    0,    0   ],
+    # 3. Anxiety/Panic -> ...
+    [0.05, 0,    0,    0.95, 0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0,    0,    0   ],
+    # 4. Breathing Difficulty -> ...
+    [0.02, 0,    0,    0,    0.95, 0,    0,    0,    0,    0,   0,   0,    0.03, 0,    0,    0,    0   ],
+    # 5. Hypovolaemia -> ...
+    [0.02, 0,    0,    0,    0,    0.95, 0,    0,    0,    0,   0,   0,    0,    0,    0.03, 0,    0   ],
+    # 6. Arrhythmic Flare -> ...
+    [0.02, 0,    0,    0,    0,    0,    0.95, 0,    0,    0,   0,   0.03, 0,    0,    0,    0,    0   ],
+    # 7. Hypoglycemia -> ...
+    [0.02, 0,    0,    0,    0,    0,    0,    0.95, 0,    0,   0,   0,    0,    0.03, 0,    0,    0   ],
+    # 8. TIA -> ...
+    [0.02, 0,    0,    0,    0,    0,    0,    0,    0.93, 0,   0,   0,    0,    0,    0,    0.05, 0   ],
+    # 9. Bathroom -> ...
+    [1.00, 0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0,    0,    0   ],
+    # 10. White Coat -> ...
+    [1.00, 0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0,    0,    0   ],
+    # 11. STEMI (crisis) -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0.98, 0,    0,    0,    0,    0.02],
+    # 12. Septic Shock -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0.98, 0,    0,    0,    0.02],
+    # 13. Compromised Airway -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0.98, 0,    0,    0.02],
+    # 14. Haemorrhagic Shock -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0.98, 0,    0.02],
+    # 15. Stroke -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0,    0.98, 0.02],
+    # 16. Death -> ...
+    [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   0,   0,    0,    0,    0,    0,    1.00]
+]
+
+
+#############################################
+# 1. DICTIONARIES WITH BIGGER WARNING/CRISIS MODIFIERS
+#############################################
+
+# We'll just amplify the multipliers. For instance, if "Cardiac_Ischaemia" used to do +5..10,
+# let's do +20..40. We only show changes in the relevant dictionaries:
+
+WARNING_STATES = {
+    "Cardiac_Ischaemia": {
+        "HR_factor_range": (1.3, 1.7),       # bigger
+        "BP_offset_range": (20, 40),         # bigger
+        "RR_offset_range": (3, 6),           # bigger
+        "O2_sat_offset_range": (-4, -2),
+        "duration_range": (360,720),         # 30–60 min in 5-sec intervals => 360–720 rows
+        "prob_escalate_crisis": 0.03,        # smaller chance
+        "maps_to_crisis": "STEMI"
+    },
+    "Sepsis": {
+        "HR_factor_range": (1.2, 1.5),
+        "BP_offset_range": (-20, -10),
+        "RR_factor_range": (1.2, 1.4),
+        "O2_sat_offset_range": (-4, -1),
+        "duration_range": (360,720),
+        "prob_escalate_crisis": 0.03,
+        "maps_to_crisis": "Septic_Shock"
+    },
+    "Acute_Anxiety": {
+        "HR_factor_range": (1.3, 1.6),
+        "RR_factor_range": (1.2, 1.5),
+        "O2_sat_offset_range": (-2, 0),
+        "duration_range": (120,240),   # 10–20 min => let's do bigger for demonstration
+        "prob_escalate_crisis": 0.0,
+        "maps_to_crisis": None
+    },
+    "Breathing_difficulty": {
+        "HR_factor_range": (1.3, 1.6),
+        "RR_factor_range": (1.3, 1.7),
+        "O2_sat_offset_range": (-5, -2),
+        "duration_range": (360,720),
+        "prob_escalate_crisis": 0.03,
+        "maps_to_crisis": "Compromised_Airway"
+    },
+    "Hypovolemia": {
+        "HR_factor_range": (1.3,1.6),
+        "BP_offset_range": (-20,-10),
+        "RR_offset_range": (3,6),
+        "O2_sat_offset_range": (-1,0),
+        "duration_range": (240,720),
+        "prob_escalate_crisis": 0.03,
+        "maps_to_crisis": "Hemorrhagic_Shock"
+    },
+    "Arrhythmic_Flare": {
+        "HR_irregular_variation": (30,50),
+        "BP_offset_range": (-20,20),
+        "duration_range": (240,720),
+        "prob_escalate_crisis": 0.03,
+        "maps_to_crisis": "STEMI"
+    },
+    "Hypoglycemia": {
+        "HR_factor_range": (1.2,1.6),
+        "BP_offset_range": (-5,0),
+        "RR_offset_range": (3,5),
+        "O2_sat_offset_range": (0,0),
+        "duration_range": (240,600),
+        "prob_escalate_crisis": 0.02,
+        "maps_to_crisis": "Compromised_Airway"
+    },
+    "TIA": {
+        "HR_factor_range": (1.1,1.3),
+        "BP_offset_range": (30,50),
+        "duration_range": (240,720),
+        "prob_escalate_crisis": 0.04,
+        "maps_to_crisis": "Stroke"
+    }
+}
+
+CRISIS_STATES = {
+    "STEMI": {
+        "HR_factor_range": (1.6,2.3),
+        "BP_offset_range": (-40,-20),
+        "O2_sat_offset_range": (-8,-3),
+        "no_spontaneous_recovery": True
+    },
+    "Septic_Shock": {
+        "HR_factor_range": (1.6,2.0),
+        "BP_offset_range": (-80,-40),
+        "RR_factor_range": (1.5,2.0),
+        "O2_sat_offset_range": (-10,-6),
+        "no_spontaneous_recovery": True
+    },
+    "Compromised_Airway": {
+        "HR_factor_range": (1.5,2.0),
+        "RR_factor_range": (2.0,3.0),
+        "O2_sat_offset_range": (-40,-20),
+        "no_spontaneous_recovery": True
+    },
+    "Hemorrhagic_Shock": {
+        "HR_factor_range": (1.5,2.5),
+        "BP_offset_range": (-80,-50),
+        "RR_factor_range": (1.5,2.0),
+        "O2_sat_offset_range": (-8,-4),
+        "no_spontaneous_recovery": True
+    },
+    "Stroke": {
+        "HR_factor_range": (1.2,1.5),
+        "BP_offset_range": (40,60),
+        "RR_factor_range": (1.2,1.4),
+        "no_spontaneous_recovery": True
+    }
+}
+
+DEATH_STATE = "Death"
+
+
 #########################################
 # 2. LOADING THE ENCOUNTERS CSV
 #########################################
@@ -326,9 +511,8 @@ def load_encounters(csv_path="test_final_ed_patients.csv"):
 # 3. LEGACY REASON & PAIN OFFSET
 #########################################
 def reason_modifiers(reason):
-    # Make sure reason is a string
     if not isinstance(reason, str):
-        reason = str(reason) if reason is not None else ""
+        reason = str(reason) if reason else ""
     reason = reason.lower()
 
     offsets = {
@@ -339,53 +523,37 @@ def reason_modifiers(reason):
         'oxygen_saturation': 0.0
     }
     
-    # Example expansions based on your spec sheet:
     if any(x in reason for x in ["laceration", "sprain", "fracture of bone", "injury of neck", "injury of knee", "impacted molars", "minor burn"]):
-        # Mild/Moderate injuries => pain offsets
-        # (heart_rate + 10–20 BPM, BP + 5–10 mmHg, etc.)
         offsets['heart_rate'] += 10
         offsets['systolic_bp'] += 5
         offsets['diastolic_bp'] += 3
         offsets['respiratory_rate'] += 2
-    
     elif any(x in reason for x in ["myocardial infarction", "chest pain"]):
-        # MI => bigger effect
         offsets['heart_rate'] += 10
         offsets['systolic_bp'] -= 5
         offsets['diastolic_bp'] -= 3
         offsets['oxygen_saturation'] -= 2
-    
     elif any(x in reason for x in ["asthma", "difficulty breathing"]):
-        # Asthma => +RR, -O2
         offsets['respiratory_rate'] += 4
         offsets['oxygen_saturation'] -= 3
-    
     elif "seizure" in reason:
         offsets['heart_rate'] += 6
-    
     elif "drug overdose" in reason:
         offsets['respiratory_rate'] -= 3
         offsets['oxygen_saturation'] -= 5
         offsets['heart_rate'] -= 5
-    
     elif any(x in reason for x in ["sepsis", "appendicitis", "infection", "pyrexia of unknown origin"]):
-        # Infectious => tachy, possible hypotension
         offsets['heart_rate'] += 5
         offsets['systolic_bp'] -= 5
         offsets['diastolic_bp'] -= 3
         offsets['oxygen_saturation'] -= 2
-    
     elif any(x in reason for x in ["burn injury", "major burn"]):
-        # more severe burn => bigger pain effect
         offsets['heart_rate'] += 15
         offsets['systolic_bp'] += 5
         offsets['diastolic_bp'] += 3
         offsets['respiratory_rate'] += 3
     
-    # etc... add more if needed
-
     return offsets
-
 
 def pain_modifiers(pain):
     try:
@@ -402,15 +570,14 @@ def pain_modifiers(pain):
     return offsets
 
 def apply_modifiers(baseline_dict, reason_desc, pain_score, height, weight, temperature):
-    # trivial approach
     r_off= reason_modifiers(reason_desc)
     p_off= pain_modifiers(pain_score)
     out={}
     for k in baseline_dict.keys():
         base= baseline_dict[k]
         if pd.isna(base):
-            base=0
-        out[k]= base + r_off[k]+ p_off[k] # ignoring height/weight for brevity
+            base= 75 if k=="oxygen_saturation" else 100  # or some fallback
+        out[k]= base + r_off[k]+ p_off[k]
     return out
 
 
@@ -420,10 +587,8 @@ def apply_modifiers(baseline_dict, reason_desc, pain_score, height, weight, temp
 def parse_conditions_from_history(hist, proc):
     if hist is None: hist = ""
     if proc is None: proc = ""
-    txt = (str(hist) + " " + str(proc)).lower()
-
-    conds = []
-
+    txt = (str(hist)+" "+str(proc)).lower()
+    conds=[]
     if "hypertension" in txt or "high blood pressure" in txt:
         conds.append("Hypertension")
     if "atrial fibrillation" in txt or "af" in txt or "heart arrhythmia" in txt:
@@ -442,11 +607,7 @@ def parse_conditions_from_history(hist, proc):
         conds.append("Anemia")
     if "chronic kidney disease" in txt or "ckd" in txt:
         conds.append("Chronic_Kidney_Disease")
-    
-    # etc... add any others from your final list
-
     return list(set(conds))
-
 
 
 #########################################
@@ -458,7 +619,8 @@ def apply_condition_baseline(df, condition_list):
             df[f"{c}_baseline"]= df[c].copy()
     n=len(df)
     for cond in condition_list:
-        if cond not in PREVIOUS_CONDITIONS: continue
+        if cond not in PREVIOUS_CONDITIONS:
+            continue
         cdict=PREVIOUS_CONDITIONS[cond]
         vs_mod= cdict.get("vital_sign_modifiers",{})
         for key,val in vs_mod.items():
@@ -474,19 +636,20 @@ def apply_condition_baseline(df, condition_list):
                     df['respiratory_rate_baseline']+= offset
                 elif "O2_sat_offset_range" in key:
                     df['oxygen_saturation_baseline']+= offset
+                    df['oxygen_saturation_baseline']= df['oxygen_saturation_baseline'].clip(0,100)
                 elif "factor_range" in key:
                     factor= np.random.uniform(low,high)
                     df['heart_rate_baseline']*=factor
             elif key=="HR_irregular_variation":
                 magnitude= np.random.randint(*val)
-                arr_events= np.random.choice([0,1], size=n, p=[0.98,0.02])
+                arr_events= np.random.choice([0,1],size=n,p=[0.98,0.02])
                 for i in range(n):
                     if arr_events[i]==1:
-                        change= np.random.randint(-magnitude, magnitude+1)
+                        change= np.random.randint(-magnitude,magnitude+1)
                         df.at[i,'heart_rate_baseline']+= change
-    # Overwrite
+    # Overwrite columns
     for c in ['heart_rate','systolic_bp','diastolic_bp','respiratory_rate','oxygen_saturation']:
-        df[c]= df[f"{c}_baseline"]
+        df[c]= df[f"{c}_baseline"]  # no final clamp except maybe 0..999
     return df
 
 
@@ -497,302 +660,125 @@ class VitalSignsGenerator:
     def __init__(self, seed=None):
         if seed is not None:
             np.random.seed(seed)
-        self.normal_ranges={
-            'heart_rate': (60,100),
-            'systolic_bp': (90,120),
-            'diastolic_bp': (60,80),
-            'respiratory_rate': (12,20),
-            'oxygen_saturation': (95,100)
-        }
     def add_natural_variation(self, base, tpoints, vs):
+        # remove strict clamp except a large range
         if vs=='heart_rate':
             var= np.sin(np.linspace(0,2*np.pi,len(tpoints)))*2
             noise= np.random.normal(0,1,len(tpoints))
-            return base+var+noise
+            return base+ var+ noise
         elif vs in ['systolic_bp','diastolic_bp']:
             var= np.sin(np.linspace(0,np.pi,len(tpoints)))*3
             noise= np.random.normal(0,0.5,len(tpoints))
-            return base+var+noise
+            return base+ var+ noise
         elif vs=='respiratory_rate':
             noise= np.random.normal(0,0.5,len(tpoints))
             return base+ noise
         elif vs=='oxygen_saturation':
             noise= np.random.normal(0,0.2,len(tpoints))
-            return np.minimum(100, base+ noise)
+            return base+ noise
         else:
             return np.array([base]*len(tpoints))
     
-    def generate_patient_series(self, patient_baseline,
+    def generate_patient_series(self,
+                                patient_baseline,
                                 duration_minutes=240,
                                 interval_seconds=5,
                                 start_time=None):
         if start_time is None:
             start_time= datetime.now()
-        n_points= int((duration_minutes*60)/interval_seconds)
+        n_points= int((duration_minutes*60)//interval_seconds)
         tpoints= np.arange(n_points)
         timestamps=[
             start_time+ timedelta(seconds=int(i*interval_seconds))
             for i in tpoints
         ]
-        data={'timestamp': timestamps}
+        data= {'timestamp': timestamps}
         for vs,base_val in patient_baseline.items():
-            if pd.isna(base_val) or base_val==0:
-                low,high=self.normal_ranges.get(vs,(60,100))
-                base_val=(low+high)/2.0
+            if pd.isna(base_val): base_val= 100
             arr= self.add_natural_variation(base_val,tpoints,vs)
             data[vs]= arr
-        return pd.DataFrame(data)
+        df= pd.DataFrame(data)
+        return df
 
 
 #########################################
 # 7. EPHEMERAL STATES
 #########################################
-def inject_bathroom_breaks(ephemeral_arr, main_state_arr):
+
+def inject_bathroom_breaks(state_array):
     """
-    Insert 0-2 bathroom breaks of 5-10min each, 
-    skipping if main_state is Warning/Crisis
+    Only from Neutral(0) => go to Bathroom(9).
+    Then row: remain bathroom for 5-10 min, then back to neutral
+    We won't combine with warnings/crises.
     """
-    n=len(ephemeral_arr)
+    n= len(state_array)
+    rows_per_min=12
     n_breaks= np.random.choice([0,1,2], p=[0.3,0.4,0.3])
-    rows_per_min=12 # 5s intervals =>12/min
     for _ in range(n_breaks):
         start= np.random.randint(0,n-1)
         dur= np.random.randint(rows_per_min*5, rows_per_min*10)
         end= min(start+dur,n-1)
-        # skip if main_state is "Warning_*" or "Crisis_*" or "Death"
-        # We'll only apply if the entire interval is baseline
-        # to keep it simpler, check a subset
-        if any([ms.startswith("Warning_") or ms.startswith("Crisis_") or ms=="Death"
-                for ms in main_state_arr[start:end+1]]):
-            continue
-        for i in range(start,end+1):
-            ephemeral_arr[i].add("Bathroom")
-    return ephemeral_arr
+        # check if the entire sub-interval is neutral
+        if all(state_array[i]==0 for i in range(start,end+1)):
+            for i in range(start,end+1):
+                state_array[i]=9
+    return state_array
 
-def inject_whitecoat(ephemeral_arr):
+def inject_whitecoat(state_array, enable_whitecoat):
     """
-    White Coat checks each hour for 2-5 min, plus some extras in first hour.
-    White coat can stack on top of anything (including warning, crisis).
+    10% of patients => white coat from neutral only
+    For 2-5 min each hour?
+    We'll keep it simpler: maybe 1-2 intervals in the 4 hours
+    If we see the sub-interval is neutral, set WhiteCoat(10).
     """
-    n=len(ephemeral_arr)
+    if not enable_whitecoat: return state_array
+    n= len(state_array)
     rows_per_min=12
-    hours= [0,1,2,3]
-    for h in hours:
-        start= h*60*rows_per_min + np.random.randint(0,5*rows_per_min)
-        if start>=n: break
-        dur= np.random.randint(2*rows_per_min,5*rows_per_min)
-        end= min(start+dur, n-1)
-        for i in range(start,end+1):
-            ephemeral_arr[i].add("WhiteCoat")
-    # extras in first hour
-    extras= np.random.randint(1,3) # 1-2
-    for _ in range(extras):
-        st= np.random.randint(0,60*rows_per_min-1)
-        dur= np.random.randint(2*rows_per_min,5*rows_per_min)
-        end= min(st+dur, n-1)
-        for i in range(st,end+1):
-            ephemeral_arr[i].add("WhiteCoat")
-    return ephemeral_arr
+    n_wc= np.random.choice([1,2], p=[0.7,0.3])  # 1 or 2 visits
+    for _ in range(n_wc):
+        start= np.random.randint(0,n-1)
+        dur= np.random.randint(rows_per_min*2, rows_per_min*5)
+        end= min(start+dur,n-1)
+        # only if sub-interval is neutral
+        if all(state_array[i]==0 for i in range(start,end+1)):
+            for i in range(start,end+1):
+                state_array[i]=10
+    return state_array
 
 
 #########################################
-# 8. DYNAMIC STATE MACHINE
+# 8. MARKOV TRANSITIONS PER ROW
 #########################################
-def pick_warning_states(characteristics, prev_conditions, current_condition):
+def get_next_state(current_state_idx):
+    row= TRANSITION_MATRIX[current_state_idx]
+    next_idx= np.random.choice(len(STATE_LIST), p=row)
+    return next_idx
+
+def build_markov_states(duration_rows, initial_idx=0):
     """
-    We'll compute a weighted probability for each possible WARNING state
-    based on:
-      - risk_modifiers from characteristics + conditions + current_condition
-      - a base chance if the current condition suggests that warning
+    We'll track the primary state transitions. Once we are in
+    Bathroom(9) or WhiteCoat(10), we remain there for that sub-interval,
+    then revert to neutral. We'll do once per minute transitions for 
+    the main Markov chain if not in ephemeral or crisis states.
     """
-    # 1) Base suggestions from CURRENT_CONDITION
-    base_prob = {}
-    if current_condition == "Chest_Pain":
-        base_prob["Cardiac_Ischaemia"] = 1.0
-    if current_condition == "Asthma":
-        base_prob["Breathing_difficulty"] = 1.0
-    if current_condition == "Appendicitis":
-        base_prob["Sepsis"] = 1.0
-    if current_condition == "Drug_Overdose":
-        base_prob["Breathing_difficulty"] = 0.8  # slightly less sure
-
-    # 2) Incorporate PREVIOUS_CONDITIONS risk_modifiers
-    # e.g. if "Hypertension" => "Cardiac_Ischaemia_warning": x2
-    final_scores = {}
-    for wstate, base_p in base_prob.items():
-        score = base_p
-        # apply from previous conditions
-        for c in prev_conditions:
-            if c not in PREVIOUS_CONDITIONS:
-                continue
-            rm = PREVIOUS_CONDITIONS[c].get("risk_modifiers", {})
-            # e.g. "Cardiac_Ischaemia_warning": 2.0
-            if f"{wstate}_warning" in rm:
-                factor = rm[f"{wstate}_warning"]
-                score *= factor
-        
-        # apply from characteristics if needed
-        if characteristics:
-            for char in characteristics:
-                if char in CHARACTERISTICS:
-                    rmc = CHARACTERISTICS[char].get("risk_modifiers", {})
-                    if f"{wstate}_warning" in rmc:
-                        score *= rmc[f"{wstate}_warning"]
-
-        final_scores[wstate] = score
-
-    # 3) pick the best if any
-    if not final_scores:
-        return None  # no relevant states
-    best_w = max(final_scores, key=final_scores.get)
-    if final_scores[best_w] < 0.5:
-        # if the top state has <0.5 probability => skip
-        return None
-    return best_w
-
-
-
-def apply_warning_offsets(df, wstate):
-    """Given a warning state, apply its offsets to the df's vitals 
-       for the duration of the warning (like 1 block)."""
-    if wstate not in WARNING_STATES:
-        return df
-    st=WARNING_STATES[wstate]
-    # We'll do a random start, random duration
-    n=len(df)
+    states= np.zeros(duration_rows,dtype=int)
+    states[0]= initial_idx
     rows_per_min=12
-    start= np.random.randint(0,n-30)
-    dur_min= np.random.randint(st["duration_range"][0], st["duration_range"][1]+1)
-    dur= dur_min*rows_per_min
-    end= min(start+dur,n-1)
-    
-    # Mark state_label
-    for i in range(start,end+1):
-        if df.at[i,"state_label"]=="Baseline": # only override baseline
-            df.at[i,"state_label"]= f"Warning_{wstate}"
-    # chance to escalate
-    if np.random.rand()< st["prob_escalate_crisis"]:
-        cstart=end+1
-        if cstart<n:
-            crisis_name= st["maps_to_crisis"]
-            for j in range(cstart,n):
-                # if we are still Baseline or Warning => escalate
-                if df.at[j,"state_label"].startswith("Warning_") or df.at[j,"state_label"]=="Baseline":
-                    df.at[j,"state_label"]= f"Crisis_{crisis_name}"
-    return df
-
-
-def apply_crisis_offsets(df):
-    """
-    If 'Crisis_X' in state_label, apply crisis offsets for the rest of the timeline
-    Also handle Death => once in Death, vitals=0
-    """
-    n=len(df)
-    # find transitions to crisis
-    for i in range(n):
-        label= df.at[i,"state_label"]
-        if label.startswith("Crisis_"):
-            crisis_name= label.split("_",1)[1]
-            # apply crisis offset
-            apply_crisis_effect(df, i, crisis_name)
-
-    return df
-
-def apply_crisis_effect(df, start_idx, crisis_name):
-    """
-    From start_idx onward or until Death
-    """
-    n=len(df)
-    cdict= CRISIS_STATES.get(crisis_name,{})
-    if not cdict: return
-    rows_per_min=12
-    # We'll do a simple approach: once in crisis, remain in crisis or die
-    # chance of death each minute, e.g. 5% => let's code that
-    idx=start_idx
-    while idx<n:
-        if df.at[idx,"state_label"]=="Death":
+    for i in range(1,duration_rows):
+        prev= states[i-1]
+        # If death => remain
+        if prev==16:
+            states[i:]=16
             break
-        if not df.at[idx,"state_label"].startswith("Crisis_"):
-            break
-        # roll for death each minute
-        if idx%rows_per_min==0: # once per minute
-            # pick a probability, e.g. 5% if you define it
-            p_death= np.random.uniform(0.02,0.08) # placeholder or from cdict
-            if np.random.rand()< p_death:
-                # mark the rest as Death
-                for k in range(idx,n):
-                    df.at[k,"state_label"]="Death"
-                break
-        idx+=1
-
-def combine_ephemeral_effects(df, ephemeral_arr):
-    """
-    WhiteCoat can *add* to the existing state's vitals.
-    Bathroom => override if not in warning/crisis.
-    We'll do a pass that merges ephemeral states with main state
-    in a 'final_state_label' if needed.
-    Also adjust vitals if ephemeral states have modifiers.
-    """
-    n= len(df)
-    # baseline columns
-    for col in ['heart_rate','systolic_bp','diastolic_bp','respiratory_rate','oxygen_saturation']:
-        if f"{col}_pre_ephem" not in df.columns:
-            df[f"{col}_pre_ephem"]= df[col].copy()
-
-    # define ephemeral offsets
-    ephemeral_mods={
-        "Bathroom":{
-            "override_to_zero":True
-        },
-        "WhiteCoat":{
-            "HR_offset_range":(10,20),
-            "BP_offset_range":(10,20)
-        }
-    }
-
-    for i in range(n):
-        e_states= ephemeral_arr[i]
-        if "Bathroom" in e_states:
-            # if main state is Warning or Crisis => ignore bathroom
-            main_label= df.at[i,"state_label"]
-            if main_label.startswith("Warning_") or main_label.startswith("Crisis_"):
-                e_states.remove("Bathroom")
-        # now apply ephemeral mods
-        # e.g. WhiteCoat can stack
-        # we store final label as state_label + ephemeral tags
-    for i in range(n):
-        main_label= df.at[i,"state_label"]
-        e_states= ephemeral_arr[i]
-        # if "Death", do nothing
-        if main_label=="Death":
-            continue
-        # apply ephemeral changes
-        for e in e_states:
-            # get ephemeral_mods[e]
-            em= ephemeral_mods.get(e,{})
-            if "override_to_zero" in em:
-                # bathroom => set vitals=0
-                for c in ["heart_rate","systolic_bp","diastolic_bp","respiratory_rate","oxygen_saturation"]:
-                    df.at[i,c]=0
-                df.at[i,"state_label"]= f"{main_label}+Bathroom"
-            else:
-                # e.g. WhiteCoat => add offset
-                for key,val in em.items():
-                    if key.endswith("_range"):
-                        low,high= val
-                        offset= np.random.uniform(low,high)
-                        if "BP_offset_range" in key:
-                            df.at[i,"systolic_bp"]+= offset
-                            df.at[i,"diastolic_bp"]+= offset*0.6
-                        elif "HR_offset_range" in key:
-                            df.at[i,"heart_rate"]+= offset
-        # rename state_label if WhiteCoat present
-        if len(e_states)>0 and "Bathroom" not in e_states:
-            for e in e_states:
-                if e!="Bathroom":
-                    df.at[i,"state_label"]= f"{main_label}+{e}"
-
-    return df
+        # If ephemeral => remain ephemeral until end of that minute sub-interval
+        # But simpler: we do the main Markov once per minute if we are in a "normal" state
+        if i%rows_per_min==0 and prev not in [9,10] and (11>prev>0 or prev==0 or prev>=11 and prev<16):
+            # do normal Markov
+            nxt= get_next_state(prev)
+            states[i]= nxt
+        else:
+            states[i]= prev
+    return states
 
 
 #########################################
@@ -800,10 +786,9 @@ def combine_ephemeral_effects(df, ephemeral_arr):
 #########################################
 def main():
     enc_df= load_encounters("test_final_ed_patients.csv")
-    from datetime import datetime
     base_time= datetime(2025,1,1,19,0,0)
     all_rows=[]
-    gen= VitalSignsGenerator(seed=42)
+    generator= VitalSignsGenerator(seed=42)
 
     for i,row in enc_df.iterrows():
         pid= row.get("PATIENT",f"Unknown_{i}")
@@ -811,14 +796,12 @@ def main():
         pain= row.get("Pain severity - 0-10 verbal numeric rating [Score] - Reported","0")
         hist= row.get("PREVIOUS_MEDICAL_HISTORY","")
         proc= row.get("PREVIOUS_MEDICAL_PROCEDURES","")
-        height= row.get("Body Height","")
-        weight= row.get("Body Weight","")
-        temp=   row.get("Body temperature","")
 
-        # baseline vitals
         def sfloat(x):
-            try: return float(x)
-            except: return np.nan
+            try:
+                return float(x)
+            except:
+                return np.nan
         pbaseline={
             'diastolic_bp': sfloat(row.get("Diastolic Blood Pressure",np.nan)),
             'systolic_bp':  sfloat(row.get("Systolic Blood Pressure",np.nan)),
@@ -827,79 +810,120 @@ def main():
             'oxygen_saturation': sfloat(row.get("Oxygen saturation in Arterial blood",np.nan))
         }
         # apply reason/pain
-        modded= apply_modifiers(pbaseline, reason,pain,height,weight,temp)
+        modded= apply_modifiers(pbaseline, reason, pain, None, None, None)
 
+        # generate 4h timeseries
         start_t= base_time+ timedelta(hours=i)
-        df= gen.generate_patient_series(
-            patient_baseline=modded,
+        df= generator.generate_patient_series(
+            patient_baseline= modded,
             duration_minutes=240,
             interval_seconds=5,
-            start_time=start_t
+            start_time= start_t
         )
 
-        # parse prev cond
-        pconds= parse_conditions_from_history(hist,proc)
-        df= apply_condition_baseline(df,pconds)
+        # apply prev conditions
+        pconds= parse_conditions_from_history(hist, proc)
+        df= apply_condition_baseline(df, pconds)
 
-        # pick a "current condition" from reason or random
-        ccond=None
-        if not isinstance(reason, str):
-            reason = str(reason) if reason is not None else ""
-        reason_l = reason.lower()
+        # Build Markov chain
+        npts= len(df)
+        markov_states= build_markov_states(npts, initial_idx=0) # 0 => Neutral
 
-        if "chest pain" in reason_l:
-            ccond="Chest_Pain"
-        elif "asthma" in reason_l:
-            ccond="Asthma"
-        elif "appendicitis" in reason_l:
-            ccond="Appendicitis"
-        elif "drug overdose" in reason_l:
-            ccond="Drug_Overdose"
-        # else random ?
+        # ephemeral states
+        # first bathroom
+        markov_states= inject_bathroom_breaks(markov_states)
+        # 10% chance for White Coat
+        enable_whitecoat= (np.random.rand()<0.1)
+        markov_states= inject_whitecoat(markov_states, enable_whitecoat)
 
-        # We'll store final state_label init as "Baseline"
-        df["state_label"]=["Baseline"]*len(df)
+        # store numeric state_label_idx
+        df["state_label"]= markov_states
 
-        # 1) We figure out which warning state to pick
-        wstate= pick_warning_states(characteristics=None, # not implemented
-                                   prev_conditions=pconds,
-                                   current_condition=ccond)
-        if wstate:
-            df= apply_warning_offsets(df,wstate)
-        
-        # 2) apply crisis offsets (some patients might have escalated)
-        df= apply_crisis_offsets(df)
+        # If crisis => degrade vitals strongly, if warning => degrade vitals significantly
+        # We'll do a pass to amplify
+        for idx in range(npts):
+            st= markov_states[idx]
+            if st in range(1,9): # it's a warning
+                warn_name= STATE_LIST[st]  # e.g. "Cardiac Ischaemia"
+                wdict= WARNING_STATES.get(warn_name,{})
+                # scale vitals
+                # e.g. HR_factor_range
+                if "HR_factor_range" in wdict:
+                    fmin,fmax= wdict["HR_factor_range"]
+                    factor= np.random.uniform(fmin,fmax)
+                    df.at[idx,"heart_rate"]*= factor
+                if "BP_offset_range" in wdict:
+                    offmin,offmax= wdict["BP_offset_range"]
+                    offset= np.random.uniform(offmin, offmax)
+                    df.at[idx,"systolic_bp"]+= offset
+                    df.at[idx,"diastolic_bp"]+= offset*0.6
+                if "RR_offset_range" in wdict:
+                    rrmin,rrmax= wdict["RR_offset_range"]
+                    rr_off= np.random.uniform(rrmin,rrmax)
+                    df.at[idx,"respiratory_rate"]+= rr_off
+                if "O2_sat_offset_range" in wdict:
+                    o2min,o2max= wdict["O2_sat_offset_range"]
+                    o2_off= np.random.uniform(o2min,o2max)
+                    df.at[idx,"oxygen_saturation"]+= o2_off
+            elif st in range(11,16): # crisis
+                cname= STATE_LIST[st]
+                cdict= CRISIS_STATES.get(cname,{})
+                if "HR_factor_range" in cdict:
+                    fmin,fmax= cdict["HR_factor_range"]
+                    factor= np.random.uniform(fmin,fmax)
+                    df.at[idx,"heart_rate"]*= factor
+                if "BP_offset_range" in cdict:
+                    offmin,offmax= cdict["BP_offset_range"]
+                    offset= np.random.uniform(offmin,offmax)
+                    df.at[idx,"systolic_bp"]+= offset
+                    df.at[idx,"diastolic_bp"]+= offset*0.6
+                if "RR_factor_range" in cdict:
+                    rrmin,rrmax= cdict["RR_factor_range"]
+                    factor2= np.random.uniform(rrmin,rrmax)
+                    df.at[idx,"respiratory_rate"]*= factor2
+                if "O2_sat_offset_range" in cdict:
+                    o2min,o2max= cdict["O2_sat_offset_range"]
+                    off2= np.random.uniform(o2min,o2max)
+                    df.at[idx,"oxygen_saturation"]+= off2
+            elif st==9:
+                # Bathroom => set vitals=0
+                df.at[idx,"heart_rate"]=0
+                df.at[idx,"systolic_bp"]=0
+                df.at[idx,"diastolic_bp"]=0
+                df.at[idx,"respiratory_rate"]=0
+                df.at[idx,"oxygen_saturation"]=0
+            elif st==10:
+                # White Coat => bigger HR, BP
+                # We'll do a modest approach
+                # no time for gradual ramp here, but possible
+                df.at[idx,"heart_rate"]+= 15
+                df.at[idx,"systolic_bp"]+= 10
+                df.at[idx,"diastolic_bp"]+= 6
 
-        # 3) ephemeral states array -> a set for each row
-        ephemeral_arr=[ set() for _ in range(len(df))]
-        # inject bathroom if baseline
-        ephemeral_arr= inject_bathroom_breaks(ephemeral_arr, list(df["state_label"]))
-        # random chance for WhiteCoat
-        # if np.random.rand()<0.5 => we do white coat
-        ephemeral_arr= inject_whitecoat(ephemeral_arr)
-
-        # 4) combine ephemeral with main
-        df= combine_ephemeral_effects(df, ephemeral_arr)
-
-        # 5) if Death => vitals=0 rest
-        died_idx= np.where(df["state_label"]=="Death")[0]
+        # Death => vitals=0 from that row onward
+        died_idx= np.where(markov_states==16)[0]
         if len(died_idx)>0:
             dstart= died_idx[0]
-            for c2 in ["heart_rate","systolic_bp","diastolic_bp","respiratory_rate","oxygen_saturation"]:
-                df.loc[dstart:, c2]=0
+            df.loc[dstart:,["heart_rate","systolic_bp","diastolic_bp","respiratory_rate","oxygen_saturation"]]=0
 
-        # round
+        # round + clamp
         for c3 in ["heart_rate","systolic_bp","diastolic_bp","respiratory_rate","oxygen_saturation"]:
-            df[c3]= df[c3].round(1)
+            df[c3]= df[c3].clip(lower=0,upper=999).round(1)
 
         df["patient_id"]= pid
-        df= df[["timestamp","patient_id","diastolic_bp","systolic_bp","heart_rate","respiratory_rate","oxygen_saturation","state_label"]]
+        # reorder
+        df= df[[
+            "timestamp","patient_id",
+            "diastolic_bp","systolic_bp","heart_rate",
+            "respiratory_rate","oxygen_saturation","state_label"
+        ]]
         all_rows.append(df)
 
     final_df= pd.concat(all_rows, ignore_index=True)
     final_df["timestamp"]= pd.to_datetime(final_df["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
     final_df.to_csv("vitals.csv", index=False)
-    print("All done. Output => vitals.csv with advanced states + ephemeral layering.")
+    print("All done. Output => vitals.csv with bigger warning/crisis modifiers, numeric state labels, no overlap ephemeral, longer stays, etc.")
 
 if __name__=="__main__":
     main()
+

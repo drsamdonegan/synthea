@@ -107,3 +107,4 @@ src/main/data/train/patients.csv
 src/main/data/train/patients_cleaned.csv
 src/main/data/train/procedures.csv
 src/main/data/train/procedures_cleaned.csv
+*.csv
