@@ -1,0 +1,419 @@
+MASTER_SPEC = {
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  A) CHARACTERISTICS
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "Age_Pediatric": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.10, 1.20),  # +10–20% HR
+            "RR_factor_range": (1.10, 1.20),
+            "BP_offset_range": (0, 0)
+        },
+        "risk_modifiers": {
+            "sepsis_warning": 1.0,
+            "pre_mi_warning": 0.5
+        }
+    },
+
+    "Age_Elderly": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {
+            "BP_offset_range": (5, 10)  # +5–10 mmHg systolic
+        },
+        "risk_modifiers": {
+            "pre_mi_warning": 1.5,
+            "sepsis_warning": 1.5
+        }
+    },
+
+    "Sex_Male": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {
+            "BP_offset_range": (0, 5)
+        },
+        "risk_modifiers": {
+            "pre_mi_warning": 1.2
+        }
+    },
+
+    "Sex_Female": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "pre_mi_warning": 1.0
+        }
+    },
+
+    "Obese": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {
+            "BP_offset_range": (5, 10),
+            "HR_offset_range": (5, 5)
+        },
+        "risk_modifiers": {
+            "pre_mi_warning": 2.0,
+            "stemi_crisis": 1.5,
+            "sepsis_warning": 1.0
+        }
+    },
+
+    "Underweight": {
+        "type": "CHARACTERISTIC",
+        "vital_sign_effects": {
+            "BP_offset_range": (-5, -5)
+        },
+        "risk_modifiers": {
+            "infection_warning": 1.3
+        }
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  B) PREVIOUS CONDITIONS
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "Hypertension": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {
+            "BP_offset_range": (10, 20)  # +10–20 mmHg
+        },
+        "risk_modifiers": {
+            "pre_mi_warning": 2.0,
+            "stemi_crisis_if_in_pre_mi_warning": 1.5
+        }
+    },
+
+    "Atrial_Fibrillation": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {
+            "HR_irregular_variation": (10, 20)  # ±10–20 BPM
+        },
+        "risk_modifiers": {
+            "pre_mi_warning": 1.2,
+            "stroke_crisis": 2.0
+        }
+    },
+
+    "Diabetes_Type2": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {
+            "HR_offset_range": (5, 10)
+        },
+        "risk_modifiers": {
+            "hypoglycemia_warning": 1.5
+        }
+    },
+
+    "Seizure_Disorder": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "seizure_crisis": 1.5
+        }
+    },
+
+    "Depression_Anxiety": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "panic_warning": 2.0
+        }
+    },
+
+    "COPD": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {
+            "O2_sat_offset_range": (-3, -2),
+            "RR_offset_range": (2, 3)
+        },
+        "risk_modifiers": {
+            "breathing_difficulty_warning": 1.5,
+            "compromised_airway_crisis_if_in_breathing_difficulty": 1.3
+        }
+    },
+
+    "Hemophilia": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "hypovolemia_warning": 2.0,
+            "hemorrhagic_crisis_if_in_hypovolemia": 2.0
+        }
+    },
+
+    "Anemia": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {
+            "HR_offset_range": (5, 10)
+        },
+        "risk_modifiers": {
+            "hemorrhagic_crisis_if_in_hypovolemia": 1.5,
+            "breathing_difficulty_warning": 1.2
+        }
+    },
+
+    "Chronic_Kidney_Disease": {
+        "type": "PREVIOUS_CONDITION",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "sepsis_warning": 1.2,
+            "hemorrhagic_crisis_if_in_hypovolemia": 1.2
+        }
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  C) CURRENT CONDITIONS
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "MildInjury_Pain": {
+        "type": "CURRENT_CONDITION",
+        "vital_sign_effects": {
+            "HR_offset_range": (10, 20),
+            "BP_offset_range": (5, 10),
+            "RR_offset_range": (2, 5),
+            "O2_sat_offset_range": (-1, 0)
+        },
+        "risk_modifiers": {}
+    },
+
+    "ChestPain": {
+        "type": "CURRENT_CONDITION",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.2, 1.5),
+            "BP_factor_range": (0.9, 1.1),
+            "O2_sat_offset_range": (-5, -1)
+        },
+        "risk_modifiers": {
+            "cardiac_ischaemia_warning": 0.8
+        }
+    },
+
+    "Asthma": {
+        "type": "CURRENT_CONDITION",
+        "vital_sign_effects": {
+            "RR_factor_range": (1.5, 2.0),
+            "HR_offset_range": (5, 10),
+            "O2_sat_offset_range": (-3, -5)
+        },
+        "risk_modifiers": {
+            "breathing_difficulty_warning": 1.0
+        }
+    },
+
+    "Appendicitis": {
+        "type": "CURRENT_CONDITION",
+        "vital_sign_effects": {
+            "HR_offset_range": (10, 20),
+            "RR_offset_range": (2, 5)
+        },
+        "risk_modifiers": {
+            "sepsis_warning": 1.3
+        }
+    },
+
+    "Drug_Overdose": {
+        "type": "CURRENT_CONDITION",
+        "vital_sign_effects": {},
+        "risk_modifiers": {
+            "breathing_difficulty_warning": 1.5
+        }
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  D) WARNING STATES
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "Cardiac_Ischaemia": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.2, 1.5),
+            "BP_offset_range": (5, 10),
+            "RR_offset_range": (2, 5),
+            "O2_sat_offset_range": (-2, -1)
+        },
+        "duration_range_minutes": (5, 30),
+        "prob_return_baseline": 0.4,
+        "prob_progress_crisis": {
+            "STEMI": 0.2
+        }
+    },
+
+    "Sepsis": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.1, 1.3),
+            "BP_offset_range": (-5, -10),
+            "RR_factor_range": (1.1, 1.2),
+            "O2_sat_offset_range": (-2, 0)
+        },
+        "duration_range_minutes": (60, 360),
+        "prob_return_baseline": 0.15,
+        "prob_progress_crisis": {
+            "Septic_Shock": 0.3
+        }
+    },
+
+    "Acute_Anxiety": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.2, 1.4),
+            "RR_factor_range": (1.2, 1.5),
+            "O2_sat_offset_range": (-1, 0)
+        },
+        "duration_range_minutes": (10, 60),
+        "prob_return_baseline": 0.8,
+        "prob_progress_crisis": {}
+    },
+
+    "Breathing_Difficulty": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.2, 1.4),
+            "RR_factor_range": (1.2, 1.5),
+            "O2_sat_offset_range": (-3, -1)
+        },
+        "duration_range_minutes": (60, 120),
+        "prob_return_baseline": 0.5,
+        "prob_progress_crisis": {
+            "Compromised_Airway": 0.2
+        }
+    },
+
+    "Bathroom_Leads_Off": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "override_to_zero": True
+        },
+        "duration_range_minutes": (5, 10),
+        "prob_return_baseline": 1.0,
+        "prob_progress_crisis": {}
+    },
+
+    "WhiteCoat": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_offset_range": (10, 20),
+            "BP_offset_range": (10, 20)
+        },
+        "duration_range_minutes": (5, 20),
+        "prob_return_baseline": 1.0,
+        "prob_progress_crisis": {}
+    },
+
+    "Hypovolemia": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.2, 1.4),
+            "BP_offset_range": (-5, -10),
+            "RR_offset_range": (2, 5)
+        },
+        "duration_range_minutes": (10, 60),
+        "prob_return_baseline": 0.35,
+        "prob_progress_crisis": {
+            "Hemorrhagic_Crisis": 0.25
+        }
+    },
+
+    "Arrhythmic_Flare": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_irregular_variation": (20, 20),
+            "BP_offset_range": (-10, 10)
+        },
+        "duration_range_minutes": (5, 30),
+        "prob_return_baseline": 0.65,
+        "prob_progress_crisis": {
+            "STEMI": 0.15
+        }
+    },
+
+    "Mild_Hypoglycemia": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.1, 1.3),
+            "BP_offset_range": (0, 0),
+            "RR_offset_range": (2, 3)
+        },
+        "duration_range_minutes": (15, 60),
+        "prob_return_baseline": 0.75,
+        "prob_progress_crisis": {
+            "Compromised_Airway": 0.1
+        }
+    },
+
+    "TIA": {
+        "type": "WARNING",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.0, 1.2),
+            "BP_offset_range": (10, 20)
+        },
+        "duration_range_minutes": (10, 120),
+        "prob_return_baseline": 0.80,
+        "prob_progress_crisis": {
+            # "Stroke_Crisis": 0.20   # if defined
+        }
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  E) CRISIS STATES
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "STEMI": {
+        "type": "CRISIS",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.3, 2.0),
+            "BP_offset_range": (-10, -30),
+            "O2_sat_offset_range": (-5, -2)
+        },
+        "no_spontaneous_recovery": True,
+        "prob_death_per_minute": 0.50
+    },
+
+    "Septic_Shock": {
+        "type": "CRISIS",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.3, 1.8),
+            "BP_offset_range": (-20, -50),
+            "RR_factor_range": (1.3, 1.6),
+            "O2_sat_offset_range": (-10, -5)
+        },
+        "no_spontaneous_recovery": True,
+        "prob_death_per_minute": 0.10
+    },
+
+    "Compromised_Airway": {
+        "type": "CRISIS",
+        "vital_sign_effects": {
+            "RR_factor_range": (1.5, 2.0),
+            "HR_factor_range": (1.2, 1.6),
+            "O2_sat_offset_range": (-20, -30)
+        },
+        "no_spontaneous_recovery": True,
+        "prob_death_per_minute": 0.70
+    },
+
+    "Hemorrhagic_Crisis": {
+        "type": "CRISIS",
+        "vital_sign_effects": {
+            "HR_factor_range": (1.3, 2.0),
+            "BP_offset_range": (-20, -50),
+            "RR_factor_range": (1.2, 1.5),
+            "O2_sat_offset_range": (-5, -2)
+        },
+        "no_spontaneous_recovery": True,
+        "prob_death_per_minute": 0.20
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #  F) DEATH STATE
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "DEATH": {
+        "type": "DEATH",
+        "vital_sign_effects": {
+            "override_to_zero": True
+        },
+        "no_spontaneous_recovery": True
+    }
+}
