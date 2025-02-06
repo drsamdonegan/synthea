@@ -110,3 +110,6 @@ src/main/data/train/procedures_cleaned.csv
 *.csv
 src/main/custom/vitals.csv
 *.csv
+src/main/custom/test_final_ed_patients.csv
+*.csv
+src/main/custom/train_final_ed_patients.csv
