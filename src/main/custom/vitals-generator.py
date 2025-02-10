@@ -384,7 +384,7 @@ DEATH_STATE = "Death"
 # 3. PATIENT ENCOUNTER PROCESSING FUNCTIONS
 #########################################
 
-def load_encounters(csv_path="test_final_ed_patients.csv"):
+def load_encounters(csv_path="train_final_ed_patients.csv"):
     """Load encounter data from a CSV file."""
     return pd.read_csv(csv_path)
 
@@ -952,25 +952,63 @@ def fade_out_death(df, rows_to_fade=240):
     return df
 
 #########################################
-# 10. INTERACTIVE PLOTTING FUNCTION
+# 10. INTERACTIVE PLOTTING FUNCTION & STATE LABELS
 #########################################
+
+def simplify_state_labels(df):
+    """
+    Map the detailed state labels into 4 output states:
+      0: Neutral, Bathroom (harmless), White Coat (harmless)
+      1: Warning states (Cardiac Ischaemia, Sepsis, Acute Anxiety/Panic,
+         Breathing Difficulty, Hypovolaemia, Arrhythmic Flare, Hypoglycemia, TIA)
+      2: Crisis states (STEMI (crisis), Septic Shock (crisis), Compromised Airway (crisis),
+         Haemorrhagic Shock (crisis), Stroke (crisis))
+      3: Death
+    """
+    mapping = {
+        0: 0,   # Neutral
+        9: 0,   # Bathroom (harmless)
+        10: 0,  # White Coat (harmless)
+        1: 1,   # Warning states:
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        11: 2,  # Crisis states:
+        12: 2,
+        13: 2,
+        14: 2,
+        15: 2,
+        16: 3   # Death
+    }
+    df["state_label"] = df["state_label"].map(mapping)
+    return df
+
+
 def interactive_patient_plot(df):
-    unique_patients = np.sort(df['patient_id'].unique())
+    # Limit to first 10 patients
+    unique_patients = np.sort(df['patient_id'].unique())[:10]  # Added slice here
     initial_patient = unique_patients[0]
+    
     fig, ax = plt.subplots(figsize=(12, 6))
     plt.subplots_adjust(bottom=0.25)
     patient_df = df[df['patient_id'] == initial_patient].copy()
     patient_df['timestamp'] = pd.to_datetime(patient_df['timestamp'])
+    
     lines = {}
     for vital in ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]:
         line, = ax.plot(patient_df['timestamp'], patient_df[vital], label=vital)
         lines[vital] = line
+    
     ax.set_title(f'Patient {initial_patient}')
     ax.legend(loc='upper right')
     ax.grid(True)
     
     ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
-    slider = Slider(ax_slider, 'Patient Index', 0, len(unique_patients)-1,
+    slider = Slider(ax_slider, 'Patient Index', 0, len(unique_patients)-1,  # This will now max out at 9
                     valinit=0, valfmt='%0.0f')
     
     def update(val):
@@ -997,30 +1035,34 @@ def main():
     print("Starting vital signs simulation...")
     
     # 1) Generate the raw data
-    df_enc = load_encounters("test_final_ed_patients.csv")
+    df_enc = load_encounters("train_final_ed_patients.csv")
     base_time = datetime(2025, 1, 1, 19, 0, 0)
-    all_rows = []
+    # Remove previous output file if it exists
+    output_csv = "vitals.csv"
+    if os.path.exists(output_csv):
+        os.remove(output_csv)
+    
     generator = VitalSignsGenerator(seed=42)
-
     patient_master = load_patient_master_data()
     patient_matrices_raw = create_patient_specific_matrices(
         basis_transition_matrix_comb, patient_master, MASTER_SPEC, state_mapping
     )
     patient_matrices = {pid: normalize_matrix(mat) for pid, mat in patient_matrices_raw.items()}
-
+    
+    # Process each patient one-by-one:
     for i, row in df_enc.iterrows():
         pid = row.get("PATIENT", f"Unknown_{i}")
         reason = row.get("REASONDESCRIPTION", "")
         pain = row.get("Pain severity - 0-10 verbal numeric rating [Score] - Reported", "0")
         hist = row.get("PREVIOUS_MEDICAL_HISTORY", "")
         proc = row.get("PREVIOUS_MEDICAL_PROCEDURES", "")
-
+    
         def sfloat(x):
             try:
                 return float(x)
             except:
                 return np.nan
-
+    
         pbaseline = {
             "diastolic_bp": sfloat(row.get("Diastolic Blood Pressure", np.nan)),
             "systolic_bp":  sfloat(row.get("Systolic Blood Pressure", np.nan)),
@@ -1028,7 +1070,7 @@ def main():
             "respiratory_rate": sfloat(row.get("Respiratory rate", np.nan)),
             "oxygen_saturation": sfloat(row.get("Oxygen saturation in Arterial blood", np.nan))
         }
-
+    
         modded = apply_modifiers(pbaseline, reason, pain, None, None, None)
         start_t = base_time + timedelta(hours=i)
         df = generator.generate_patient_series(
@@ -1037,21 +1079,20 @@ def main():
             interval_seconds=5,
             start_time=start_t
         )
-
+    
         pconds = parse_conditions_from_history(hist, proc)
         df = apply_condition_baseline(df, pconds)
-        
+    
         trans_matrix = patient_matrices.get(pid, normalize_matrix(basis_transition_matrix))
         states_seq_str = simulate_patient_states(pid, trans_matrix, debug=True)
         states_seq = [STATE_LIST.index(state) for state in states_seq_str]
         df["state_label"] = states_seq
         print(f"Patient {pid} state sequence: {states_seq}")
-
+    
         # Apply warning/crisis offsets row-by-row:
         npts = len(df)
         for idx in range(npts):
             st = states_seq[idx]
-            # Warning states
             if 1 <= st <= 8:
                 wname = STATE_LIST[st]
                 wdict = WARNING_STATES[wname]
@@ -1076,8 +1117,6 @@ def main():
                     omin2, omax2 = wdict["O2_sat_offset_range"]
                     o2off = np.random.uniform(omin2, omax2)
                     df.at[idx, "oxygen_saturation"] += o2off
-            
-            # Crisis states
             elif 11 <= st <= 15:
                 cname = STATE_LIST[st]
                 cdict = CRISIS_STATES[cname]
@@ -1098,53 +1137,50 @@ def main():
                     omin2, omax2 = cdict["O2_sat_offset_range"]
                     o2off = np.random.uniform(omin2, omax2)
                     df.at[idx, "oxygen_saturation"] += o2off
-            
-            # Bathroom: forced to zero
             elif st == 9:
                 df.at[idx, "heart_rate"] = 0
                 df.at[idx, "systolic_bp"] = 0
                 df.at[idx, "diastolic_bp"] = 0
                 df.at[idx, "respiratory_rate"] = 0
                 df.at[idx, "oxygen_saturation"] = 0
-            
-            # White Coat: quick offset
             elif st == 10:
                 df.at[idx, "heart_rate"] += 15
                 df.at[idx, "systolic_bp"] += 10
                 df.at[idx, "diastolic_bp"] += 6
-
-        # Just clip and round for safety
+    
+        if 16 in states_seq:
+            died_idx = [index for index, state in enumerate(states_seq) if state == 16]
+            if died_idx:
+                dstart = died_idx[0]
+                df.loc[dstart:, ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]] = 0
+    
         for col in ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]:
             df[col] = df[col].clip(lower=0, upper=999).round(1)
-
+    
         df["patient_id"] = pid
-        df = df[[
-            "timestamp", "patient_id", "diastolic_bp", "systolic_bp",
-            "heart_rate", "respiratory_rate", "oxygen_saturation", "state_label"
-        ]]
-        all_rows.append(df)
+        df = df[["timestamp", "patient_id", "diastolic_bp", "systolic_bp", "heart_rate",
+                 "respiratory_rate", "oxygen_saturation", "state_label"]]
+    
+        # 2) Smooth transitions for this patient
+        df_smoothed = smooth_vitals_transitions(df)
+        df_smoothed = apply_continuous_noise(df_smoothed)   # if defined
+        df_smoothed = fade_out_death(df_smoothed, rows_to_fade=240)  # if defined
+        df_smoothed = simplify_state_labels(df_smoothed)
 
-    final = pd.concat(all_rows, ignore_index=True)
-    final["timestamp"] = pd.to_datetime(final["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
-
-    # 2) Smooth transitions
-    final_smoothed = smooth_vitals_transitions(final)
-
-    # 3) Ensure we have continuous noise in non-Death states
-    final_smoothed = apply_continuous_noise(final_smoothed)
-
-    # 4) Fade Death to zero after ~20 min
-    final_smoothed = fade_out_death(final_smoothed, rows_to_fade=240)
-
-    # 5) Write to CSV
-    final_smoothed.to_csv("vitals.csv", index=False)
+        # Round all vital sign columns to one decimal place
+        vital_columns = ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]
+        for col in vital_columns:
+            df_smoothed[col] = df_smoothed[col].round(1)
+    
+        # 3) Append this patient's smoothed data to CSV
+        if not os.path.exists(output_csv):
+            df_smoothed.to_csv(output_csv, index=False)
+        else:
+            df_smoothed.to_csv(output_csv, mode='a', header=False, index=False)
+    
     print("Done! Wrote 'vitals.csv' with patient-specific state transitions.")
+    interactive_patient_plot(df_smoothed)  # (or re-read the file if needed)
+    
+if __name__ == "__main__":
+    main()
 
-    # 6) Interactive plot
-    interactive_patient_plot(final_smoothed)
-    
-if __name__ == "__main__":
-    main()
-    
-if __name__ == "__main__":
-    main()
