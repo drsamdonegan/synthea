@@ -1,34 +1,316 @@
 #!/usr/bin/env python
-"""
-Merged Script for Generating Patient Vital Signs and Patient‐Specific State Transitions
-
-This script combines:
-  1. A vital signs generator that uses an initial CSV file of encounters to create
-     a series of vital signs (sampled at 5-second intervals) and simulates state transitions
-     using a Markov chain.
-  2. A patient-specific transition matrix generator that reads patient master data and conditions,
-     applies risk modifiers, and then simulates unique state sequences for each patient.
-  3. A smoothing step that applies state- and vital-specific noise (via separate noise functions)
-     at the moment of state transitions. In the smoothing, the noise amplitude is interpolated
-     with a shallower S-curve than the value interpolation so that the noise “fades” in/out gradually.
-  4. An interactive plotting function that lets you scroll through the vital signs for each patient.
-     
-The output includes:
-  - A CSV file "vitals.csv" with the simulated vital sign data.
-  - An interactive plot window to view each patient’s time series.
-"""
-
 import os
+import csv
+import math
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
+from datetime import datetime, timedelta
+# Import the ECG simulation function (assumed available)
+from ecg_simulate import ecg_simulate
 
-#############################################
-# 1. DICTIONARIES (Complete from Spec Sheet)
-#############################################
+##########################################################
+# ECG GENERATION FUNCTIONS (from your ecg script)
+##########################################################
+def base_ecg_params():
+    """
+    Returns a dictionary of baseline parameters for ecg_simulate (ECGSYN).
+    """
+    return {
+        "duration": 10,             # will be overridden per block/chunk
+        "length": None,             # computed by ecg_simulate if None
+        "sampling_rate": 250,
+        "noise": 0.05,              # amplitude of Laplace noise
+        "heart_rate": 70,           # BPM
+        "heart_rate_std": 1,        # BPM standard deviation
+        "lfhfratio": 0.5,           # ratio of low-frequency to high-frequency HR variability
+        "ti": (-85, -15, 0, 15, 125),  # P, Q, R, S, T wave angles (degrees)
+        "ai": (0.39, -5, 30, -7.5, 0.30),  # amplitudes of PQRST waves
+        "bi": (0.29, 0.1, 0.1, 0.1, 0.44)  # Gaussian widths for each wave
+    }
 
+def apply_vitals_to_params(hr, diastolic_bp, systolic_bp, rr, spo2, a, b, t):
+    """
+    Modify ECG parameters (a, b, t) based on current vitals.
+    (See your original comments for details.)
+    """
+    a = list(a)
+    b = list(b)
+    t = list(t)
+    
+    baseline_hr   = 70.0
+    baseline_sbp  = 120.0
+    baseline_dbp  = 80.0
+    baseline_rr   = 16.0
+    baseline_spo2 = 98.0
+
+    # Adjust R-wave amplitude based on systolic BP
+    if systolic_bp >= baseline_sbp:
+        sbp_diff = systolic_bp - baseline_sbp
+        factor = 1 + 0.05 * (sbp_diff / 10.0)
+        factor = min(max(factor, 0.9), 1.1)
+    else:
+        sbp_diff = baseline_sbp - systolic_bp
+        factor = 1 + 0.02 * (sbp_diff / 10.0)
+        factor = min(factor, 1.05)
+    a[2] = a[2] * factor
+
+    # Adjust Q-wave amplitude based on diastolic BP
+    dbp_diff = diastolic_bp - baseline_dbp
+    q_factor = 1 + 0.03 * (dbp_diff / 10.0) if dbp_diff > 0 else 1
+    q_factor = min(max(q_factor, 0.95), 1.05)
+    a[1] = a[1] * q_factor
+
+    # Adjust T-wave amplitude based on respiratory rate
+    rr_diff = rr - baseline_rr
+    if rr_diff > 0:
+        t_factor = max(1 - 0.01 * rr_diff, 0.7)
+        a[4] = a[4] * t_factor
+
+    # Adjust P-wave amplitude based on SpO2
+    spo2_diff = baseline_spo2 - spo2
+    if spo2_diff > 0:
+        new_a0 = a[0] - 0.01 * spo2_diff
+        a[0] = np.clip(new_a0, 0.2, 0.3)
+    
+    # Additional T-wave reduction for severe hypoxemia
+    if spo2 < 90:
+        hypoxemia_diff = 90 - spo2
+        hypoxemia_factor = max(1 - 0.02 * hypoxemia_diff, 0.85)
+        a[4] = a[4] * hypoxemia_factor
+
+    # Adjust widths based on heart rate
+    if hr > baseline_hr:
+        width_factor = 1 - 0.01 * (hr - baseline_hr)
+        width_factor = max(width_factor, 0.8)
+        b = [width * width_factor for width in b]
+
+    # Adjust timing parameters inversely with heart rate
+    if hr > 0:
+        t = [ti * (baseline_hr / hr) for ti in t]
+
+    return a, b, t
+
+def create_ecg_params_from_vitals(block_df, base_params, state_label):
+    """
+    Create new ECG parameters from a block of vitals data.
+    Applies state-specific morphological changes.
+    """
+    p_out = dict(base_params)
+    defaults = {
+        "heart_rate": 70,
+        "diastolic_bp": 80,
+        "systolic_bp": 120,
+        "respiratory_rate": 12,
+        "oxygen_saturation": 98
+    }
+    hr_avg = block_df["heart_rate"].mean() if not pd.isna(block_df["heart_rate"].mean()) else defaults["heart_rate"]
+    hr_std = block_df["heart_rate"].std() if not pd.isna(block_df["heart_rate"].std()) else 1.0
+    dbp_avg = block_df["diastolic_bp"].mean() if not pd.isna(block_df["diastolic_bp"].mean()) else defaults["diastolic_bp"]
+    sbp_avg = block_df["systolic_bp"].mean() if not pd.isna(block_df["systolic_bp"].mean()) else defaults["systolic_bp"]
+    rr_avg = block_df["respiratory_rate"].mean() if not pd.isna(block_df["respiratory_rate"].mean()) else defaults["respiratory_rate"]
+    spo2_avg = block_df["oxygen_saturation"].mean() if not pd.isna(block_df["oxygen_saturation"].mean()) else defaults["oxygen_saturation"]
+
+    p_out["heart_rate"] = max(min(hr_avg, 200), 40)
+    p_out["heart_rate_std"] = max(min(hr_std, 10), 0)
+    
+    a_i_list = list(p_out["ai"])
+    t_i_list = list(p_out["ti"])
+    b_i_list = list(p_out["bi"])
+    
+    def angle_multiplier(current_angle, desired_degree_shift):
+        if abs(current_angle) < 1e-6:
+            base_val = 1.0
+        else:
+            base_val = current_angle
+        new_angle = base_val + desired_degree_shift
+        return new_angle / base_val
+
+    # Example state-specific changes (you can expand these as needed)
+    if state_label == 1:  # Cardiac Ischaemia
+        a_i_list[4] = -abs(a_i_list[4]) * 0.8
+        a_i_list[2] = a_i_list[2] * 0.9
+        t_i_list[4] *= angle_multiplier(t_i_list[4], +3)
+        p_out["lfhfratio"] *= 0.8
+    elif state_label == 9:  # Bathroom: zero out the ECG
+        a_i_list = [0, 0, 0, 0, 0]
+        p_out["noise"] = 0.0
+    elif state_label == 16:  # Death
+        a_i_list = [0, 0, 0, 0, 0]
+        p_out["noise"] = 0.0
+    # (Include other states as needed...)
+
+    p_out["ai"] = tuple(a_i_list)
+    p_out["ti"] = tuple(t_i_list)
+    p_out["bi"] = tuple(b_i_list)
+    return p_out
+
+def s_curve_ecg(alpha, steepness=3.0):
+    """S-curve (logistic) function for ECG blending."""
+    return 1.0 / (1.0 + np.exp(-steepness * (alpha - 0.5)))
+
+def blend_ecg_params(old_params, new_params, alpha):
+    """
+    Interpolate numeric fields in old_params -> new_params with factor alpha.
+    """
+    out = dict(new_params)
+    for key in ["ti", "ai", "bi"]:
+        if key in old_params and key in new_params:
+            old_array = old_params[key]
+            new_array = new_params[key]
+            if len(old_array) == len(new_array):
+                blended = []
+                for (ov, nv) in zip(old_array, new_array):
+                    blended.append((1 - alpha) * ov + alpha * nv)
+                out[key] = tuple(blended)
+    for key2 in ["heart_rate", "noise", "heart_rate_std"]:
+        if key2 in old_params and key2 in new_params:
+            out[key2] = (1 - alpha) * old_params[key2] + alpha * new_params[key2]
+    return out
+
+def generate_ecg_for_block(block_df, old_params, new_params, sampling_rate=250):
+    """
+    Create one contiguous ECG snippet for the entire block.
+    Uses sub-chunks to blend parameters from old_params to new_params.
+    """
+    block_duration_sec = 5.0 * len(block_df)
+    if block_duration_sec <= 0:
+        return np.array([]), np.array([])
+
+    chunk_size = 5.0
+    n_chunks = int(math.ceil(block_duration_sec / chunk_size))
+    n_total_samples = int(block_duration_sec * sampling_rate)
+    ecg_out = np.zeros(n_total_samples)
+    time_out = np.linspace(0, block_duration_sec, n_total_samples, endpoint=False)
+    idx_start = 0
+
+    for chunk_i in range(n_chunks):
+        chunk_start_sec = chunk_i * chunk_size
+        chunk_end_sec = min(block_duration_sec, chunk_start_sec + chunk_size)
+        this_chunk_duration = chunk_end_sec - chunk_start_sec
+        if this_chunk_duration <= 0:
+            break
+        alpha_lin = chunk_i / float(max(n_chunks - 1, 1))
+        alpha_s = s_curve_ecg(alpha_lin, steepness=5.0)
+        chunk_params = blend_ecg_params(old_params, new_params, alpha_s)
+        chunk_params["duration"] = this_chunk_duration
+        chunk_params["length"] = None
+        chunk_params["sampling_rate"] = sampling_rate
+        ecg_chunk = ecg_simulate(**chunk_params)
+        chunk_nsamples = len(ecg_chunk)
+        idx_end = idx_start + chunk_nsamples
+        if idx_end > len(ecg_out):
+            ecg_chunk = ecg_chunk[:(len(ecg_out) - idx_start)]
+            idx_end = len(ecg_out)
+        ecg_out[idx_start:idx_end] = ecg_chunk
+        idx_start = idx_end
+    return time_out, ecg_out
+
+def generate_ecg_postprocess(vitals_csv_path, ecg_csv_name):
+    """
+    Reads the vitals CSV, groups rows into blocks (per patient and state),
+    generates ECG snippets for each block using the ecg_simulate function,
+    and writes the output to ecg_csv_name.
+    """
+    import csv
+    if not os.path.exists(vitals_csv_path):
+        raise FileNotFoundError(f"Cannot find {vitals_csv_path}")
+    df = pd.read_csv(vitals_csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df.sort_values(["patient_id", "timestamp"], inplace=True)
+    df["block_change"] = (df["patient_id"].shift(1) != df["patient_id"]) | (df["state_label"].shift(1) != df["state_label"])
+    df["block_id"] = df["block_change"].cumsum()
+    base_p = base_ecg_params()
+    ecg_records = []
+    prev_params_by_pid = {}
+    grouped = df.groupby(["block_id", "patient_id"], as_index=False)
+    for (block_id, pid), block_df in grouped:
+        st_label = block_df["state_label"].iloc[0]
+        new_params = create_ecg_params_from_vitals(block_df, base_p, st_label)
+        old_params = prev_params_by_pid.get(pid, base_p)
+        if st_label == 9:  # For Bathroom state, use flat parameters.
+            old_params = new_params
+        t_ecg, snippet = generate_ecg_for_block(block_df, old_params, new_params, sampling_rate=base_p["sampling_rate"])
+        block_start_ts = block_df["timestamp"].iloc[0].isoformat() if len(block_df) > 0 else ""
+        for i, amp in enumerate(snippet):
+            ecg_records.append({
+                "patient_id": pid,
+                "block_id": block_id,
+                "block_start_timestamp": block_start_ts,
+                "time_in_block_sec": round(t_ecg[i], 3),
+                "ecg_amplitude": round(float(amp), 5),
+                "state_label": st_label
+            })
+        prev_params_by_pid[pid] = new_params
+    out_df = pd.DataFrame(ecg_records)
+    out_df.to_csv(ecg_csv_name, index=False, quoting=csv.QUOTE_NONNUMERIC)
+    print(f"ECG data saved to {ecg_csv_name}")
+
+
+def generate_ecg_for_patient(patient_df, patient_id, base_params, ecg_csv, prev_params=None):
+    """
+    Generate ECG data for a single patient's vital signs DataFrame and append
+    the ECG records to ecg_csv.
+
+    Parameters:
+      patient_df   : DataFrame with columns including timestamp, heart_rate,
+                     diastolic_bp, systolic_bp, respiratory_rate, oxygen_saturation,
+                     and state_label.
+      patient_id   : ID of the patient.
+      base_params  : The base ECG parameters (from base_ecg_params()).
+      ecg_csv      : Path to the ECG output CSV file.
+      prev_params  : The previous ECG parameters (optional) for smooth blending.
+                     If None, base_params is used.
+    Returns:
+      The final ECG parameters for this patient (useful if processing multiple blocks).
+    """
+    # Sort patient data by timestamp
+    patient_df = patient_df.sort_values("timestamp")
+    # Identify blocks by change in state_label
+    patient_df["block_change"] = patient_df["state_label"].shift(1) != patient_df["state_label"]
+    patient_df["block_id"] = patient_df["block_change"].cumsum()
+
+    ecg_records = []
+    if prev_params is None:
+        prev_params = base_params
+
+    # Process each block for this patient
+    for block_id, block_df in patient_df.groupby("block_id"):
+        st_label = block_df["state_label"].iloc[0]
+        new_params = create_ecg_params_from_vitals(block_df, base_params, st_label)
+        # For example, if in Bathroom state, override blending:
+        if st_label == 9:
+            prev_params = new_params
+        # Generate the ECG snippet for this block:
+        t_ecg, snippet = generate_ecg_for_block(block_df, prev_params, new_params,
+                                                sampling_rate=base_params["sampling_rate"])
+        block_start_ts = block_df["timestamp"].iloc[0].isoformat()
+        for i, amp in enumerate(snippet):
+            ecg_records.append({
+                "patient_id": patient_id,
+                "block_id": block_id,
+                "block_start_timestamp": block_start_ts,
+                "time_in_block_sec": round(t_ecg[i], 3),
+                "ecg_amplitude": round(float(amp), 5),
+                "state_label": st_label
+            })
+        prev_params = new_params
+
+    # Convert to DataFrame and write/appended to ecg_csv
+    df_ecg = pd.DataFrame(ecg_records)
+    if not os.path.exists(ecg_csv):
+        df_ecg.to_csv(ecg_csv, index=False, quoting=csv.QUOTE_NONNUMERIC)
+    else:
+        df_ecg.to_csv(ecg_csv, mode='a', header=False, index=False)
+    return prev_params
+
+##########################################################
+# VITAL SIGNS SIMULATION FUNCTIONS & DICTIONARIES
+##########################################################
+# (The following dictionaries and functions are taken from your vital sign generator script)
+
+# Example dictionaries (adjust as needed)
 CHARACTERISTICS = {
     "Age_Pediatric": {
         "vital_sign_modifiers": {
@@ -136,8 +418,8 @@ PREVIOUS_CONDITIONS = {
     },
     "Hemophilia": {
         "risk_modifiers": {
-            "Hypovolemia_warning": 2.0,
-            "Hemorrhagic_Shock_crisis_if_Hypovolemia": 2.0
+            "Hypovolaemia_warning": 2.0,
+            "Hemorrhagic_Shock_crisis_if_Hypovolaemia": 2.0
         }
     },
     "Anemia": {
@@ -145,14 +427,14 @@ PREVIOUS_CONDITIONS = {
             "HR_offset_range": (5, 10)
         },
         "risk_modifiers": {
-            "Hemorrhagic_Shock_crisis_if_Hypovolemia": 1.5,
+            "Hemorrhagic_Shock_crisis_if_Hypovolaemia": 1.5,
             "Breathing_difficulty_warning": 1.2
         }
     },
     "Chronic_Kidney_Disease": {
         "risk_modifiers": {
             "Sepsis_warning": 1.2,
-            "Hemorrhagic_Shock_crisis_if_Hypovolemia": 1.2
+            "Hemorrhagic_Shock_crisis_if_Hypovolaemia": 1.2
         }
     }
 }
@@ -225,20 +507,16 @@ CURRENT_CONDITIONS = {
     }
 }
 
-#############################################
-# 2. STATE LIST & BASE TRANSITION MATRIX
-#############################################
-
 STATE_LIST = [
     "Neutral",                     # 0
-    "Cardiac Ischaemia",           # 1 (warning)
-    "Sepsis",                      # 2 (warning)
-    "Acute Anxiety/Panic",         # 3 (warning)
-    "Breathing Difficulty",        # 4 (warning)
-    "Hypovolaemia",                # 5 (warning)
-    "Arrhythmic Flare",            # 6 (warning)
-    "Hypoglycemia",                # 7 (warning)
-    "TIA",                         # 8 (warning)
+    "Cardiac Ischaemia",           # 1
+    "Sepsis",                      # 2
+    "Acute Anxiety/Panic",         # 3
+    "Breathing Difficulty",        # 4
+    "Hypovolaemia",                # 5
+    "Arrhythmic Flare",            # 6
+    "Hypoglycemia",                # 7
+    "TIA",                         # 8
     "Bathroom (harmless)",         # 9
     "White Coat (harmless)",       # 10
     "STEMI (crisis)",              # 11
@@ -380,11 +658,8 @@ CRISIS_STATES = {
 
 DEATH_STATE = "Death"
 
-#########################################
-# 3. PATIENT ENCOUNTER PROCESSING FUNCTIONS
-#########################################
-
-def load_encounters(csv_path="train_final_ed_patients.csv"):
+# Functions for patient encounter processing
+def load_encounters(csv_path="test_final_ed_patients.csv"):
     """Load encounter data from a CSV file."""
     return pd.read_csv(csv_path)
 
@@ -488,27 +763,21 @@ def apply_condition_baseline(df, condition_list):
         df[c] = df[f"{c}_baseline"]
     return df
 
-#########################################
-# 4. VITAL SIGNS GENERATOR CLASS
-#########################################
-
+# Vital Signs Generator Class
 class VitalSignsGenerator:
     def __init__(self, seed=None):
         if seed is not None:
             np.random.seed(seed)
             
     def add_natural_variation(self, base, tpoints, vs):
-        # Possibly add a small random noise to each row to avoid perfect sine wave:
         var_sin = np.sin(np.linspace(0, 2*np.pi, len(tpoints))) * 2
-        # Add small random noise
-        noise = np.random.normal(0, 0.5, size=len(tpoints))  # extra
+        noise = np.random.normal(0, 0.5, size=len(tpoints))
         if vs in ['heart_rate']:
             return base + var_sin + noise
         elif vs in ['systolic_bp', 'diastolic_bp']:
             var = np.sin(np.linspace(0, np.pi, len(tpoints))) * 3
             return base + var + noise
         else:
-            # for respiratory_rate, oxygen_saturation, we just add noise
             return np.array([base]*len(tpoints)) + noise
             
     def generate_patient_series(self, patient_baseline, duration_minutes=240, interval_seconds=5, start_time=None):
@@ -530,10 +799,7 @@ class VitalSignsGenerator:
             data[vs] = arr
         return pd.DataFrame(data)
 
-#########################################
-# 5. STATE SIMULATION FUNCTIONS
-#########################################
-
+# State Simulation Functions
 def build_markov_states(duration_rows, transition_matrix, initial_idx=0):
     states_array = np.zeros(duration_rows, dtype=int)
     states_array[0] = initial_idx
@@ -544,7 +810,7 @@ def build_markov_states(duration_rows, transition_matrix, initial_idx=0):
             states_array[i:] = 16
             break
         if i % rows_per_min == 0 and prev not in [9, 10, 16]:
-            nxt = np.random.choice(len(STATE_LIST), p=transition_matrix[prev])
+            nxt = np.random.choice(range(len(STATE_LIST)), p=transition_matrix[prev])
             states_array[i] = nxt
         else:
             states_array[i] = prev
@@ -578,10 +844,7 @@ def inject_whitecoat(state_array, enable_whitecoat):
                 state_array[x] = 10
     return state_array
 
-#########################################
-# 6. PATIENT-SPECIFIC TRANSITION MATRIX FUNCTIONS
-#########################################
-
+# Transition matrix functions
 description_to_column = {
     'Body mass index 30+ - obesity (finding)': 'Obese',
     'Body mass index 40+ - severely obese (finding)': 'Obese',
@@ -623,9 +886,9 @@ MASTER_SPEC = {
     "Seizure_Disorder": {"risk_modifiers": {"seizure_crisis": 1.5}},
     "Depression_Anxiety": {"risk_modifiers": {"panic_warning": 2.0}},
     "COPD": {"risk_modifiers": {"breathing_difficulty_warning": 1.5, "compromised_airway_crisis_if_in_breathing_difficulty": 1.3}},
-    "Hemophilia": {"risk_modifiers": {"hypovolemia_warning": 2.0, "hemorrhagic_crisis_if_in_hypovolemia": 2.0}},
-    "Anemia": {"risk_modifiers": {"hemorrhagic_crisis_if_in_hypovolemia": 1.5, "breathing_difficulty_warning": 1.2}},
-    "Chronic_Kidney_Disease": {"risk_modifiers": {"sepsis_warning": 1.2, "hemorrhagic_crisis_if_in_hypovolemia": 1.2}},
+    "Hemophilia": {"risk_modifiers": {"hypovolaemia_warning": 2.0, "hemorrhagic_crisis_if_in_hypovolaemia": 2.0}},
+    "Anemia": {"risk_modifiers": {"hemorrhagic_crisis_if_in_hypovolaemia": 1.5, "breathing_difficulty_warning": 1.2}},
+    "Chronic_Kidney_Disease": {"risk_modifiers": {"sepsis_warning": 1.2, "hemorrhagic_crisis_if_in_hypovolaemia": 1.2}},
     "MildInjury_Pain": {},
     "ChestPain": {"risk_modifiers": {"cardiac_ischaemia_warning": 0.8}},
     "Asthma": {"risk_modifiers": {"breathing_difficulty_warning": 1.0}},
@@ -642,89 +905,12 @@ state_mapping = {
     "panic_warning": "Acute Anxiety/Panic",
     "breathing_difficulty_warning": "Breathing Difficulty",
     "compromised_airway_crisis_if_in_breathing_difficulty": "Compromised Airway (crisis)",
-    "hypovolemia_warning": "Hypovolaemia",
-    "hemorrhagic_crisis_if_in_hypovolemia": "Haemorrhagic Shock (crisis)",
+    "hypovolaemia_warning": "Hypovolaemia",
+    "hemorrhagic_crisis_if_in_hypovolaemia": "Haemorrhagic Shock (crisis)",
     "stroke_crisis": "Stroke (crisis)"
 }
 
-def create_patient_specific_matrices(basis_transition_matrix, patient_data, master_spec, state_mapping):
-    states = basis_transition_matrix['states']
-    base_matrix = np.array(basis_transition_matrix['transition_matrix'])
-    patient_matrices = {}
-    for index, patient in patient_data.iterrows():
-        patient_matrix = np.copy(base_matrix)
-        for characteristic, details in master_spec.items():
-            if patient.get(characteristic, 0) == 1 and "risk_modifiers" in details:
-                for modified_state, modifier in details['risk_modifiers'].items():
-                    if modified_state in state_mapping and state_mapping[modified_state] in states:
-                        from_state_index = states.index(state_mapping[modified_state])
-                        for to_state_index in range(len(states)):
-                            patient_matrix[to_state_index, from_state_index] *= modifier
-        patient_matrices[patient['patient_id']] = patient_matrix
-    return patient_matrices
-
-def normalize_matrix(matrix):
-    row_sums = matrix.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1
-    return matrix / row_sums
-
-#########################################
-# 7. SIMULATION & PLOTTING OF STATE SEQUENCES
-#########################################
-
-def simulate_patient_states(patient_id, transition_matrix, debug=False):
-    total_time = 14400
-    time_step = 5
-    current_state = 'Neutral'
-    states_sequence = []
-    current_time = 0
-    state_index = STATE_LIST.index(current_state)
-    next_state_index = np.random.choice(range(len(STATE_LIST)), p=transition_matrix[state_index])
-    current_state = STATE_LIST[next_state_index]
-    if debug:
-        print(f"Initial state transition from 'Neutral' to '{current_state}'")
-    while current_time < total_time:
-        duration_range = state_durations.get(current_state, [10, 30])
-        possible_durations = list(range(duration_range[0], duration_range[1] + 1, 5))
-        state_duration = np.random.choice(possible_durations)
-        end_time = min(current_time + state_duration * 60, total_time)
-        if debug:
-            print(f"At second {current_time}, '{current_state}' for {state_duration} minutes")
-        while current_time < end_time:
-            states_sequence.append(current_state)
-            current_time += time_step
-        if current_time < total_time:
-            state_index = STATE_LIST.index(current_state)
-            next_state_index = np.random.choice(range(len(STATE_LIST)), p=transition_matrix[state_index])
-            current_state = STATE_LIST[next_state_index]
-            if debug:
-                print(f"At second {current_time}, transitioning to '{current_state}'", end=' | ')
-    return states_sequence
-
-state_durations = {
-    "Neutral": [10, 60],
-    "Cardiac Ischaemia": [15, 45],
-    "Sepsis": [30, 60],
-    "Acute Anxiety/Panic": [10, 30],
-    "Breathing Difficulty": [15, 40],
-    "Hypovolaemia": [20, 50],
-    "Arrhythmic Flare": [10, 30],
-    "Hypoglycemia": [10, 25],
-    "TIA": [15, 35],
-    "Bathroom (harmless)": [5, 10],
-    "White Coat (harmless)": [5, 20],
-    "STEMI (crisis)": [20, 60],
-    "Septic Shock (crisis)": [30, 60],
-    "Compromised Airway (crisis)": [20, 50],
-    "Haemorrhagic Shock (crisis)": [25, 55],
-    "Stroke (crisis)": [20, 60],
-    "Death": [5, 60]
-}
-
-#########################################
-# 8. PATIENT MASTER DATA PROCESSING
-#########################################
-
+# Define load_patient_master_data function
 def load_patient_master_data(patients_csv='../data/train/patients.csv',
                              conditions_csv='../data/train/conditions.csv'):
     pt = pd.read_csv(patients_csv)
@@ -754,31 +940,42 @@ def load_patient_master_data(patients_csv='../data/train/patients.csv',
     patient_data.rename(columns={'PATIENT': 'patient_id'}, inplace=True)
     return patient_data
 
-#########################################
-# Noise Functions
-#########################################
+def create_patient_specific_matrices(basis_transition_matrix, patient_data, master_spec, state_mapping):
+    states = basis_transition_matrix['states']
+    base_matrix = np.array(basis_transition_matrix['transition_matrix'])
+    patient_matrices = {}
+    for index, patient in patient_data.iterrows():
+        patient_matrix = np.copy(base_matrix)
+        for characteristic, details in master_spec.items():
+            if patient.get(characteristic, 0) == 1 and "risk_modifiers" in details:
+                for modified_state, modifier in details['risk_modifiers'].items():
+                    if modified_state in state_mapping and state_mapping[modified_state] in states:
+                        from_state_index = states.index(state_mapping[modified_state])
+                        for to_state_index in range(len(states)):
+                            patient_matrix[to_state_index, from_state_index] *= modifier
+        patient_matrices[patient['patient_id']] = patient_matrix
+    return patient_matrices
+
+def normalize_matrix(matrix):
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    return matrix / row_sums
+
+# Smoothing functions for vital sign transitions
 def s_curve(x, steepness=5.0):
-    """Logistic S-curve from 0..1 as x goes 0..1."""
     return 1.0 / (1.0 + np.exp(-steepness*(x - 0.5)))
 
 def noise_for_vital(vital):
-    """
-    Increase these to ensure overall more noise:
-    """
     if vital in ["heart_rate", "systolic_bp", "diastolic_bp"]:
-        return 1.2  # was 0.8
+        return 1.2
     elif vital == "respiratory_rate":
-        return 0.7  # was 0.4
+        return 0.7
     elif vital == "oxygen_saturation":
-        return 0.4  # was 0.2
+        return 0.4
     else:
         return 0.8
 
 def state_noise_multiplier(state_label):
-    """
-    If you want even bigger differences, tweak these multipliers, 
-    but now the base is already raised.
-    """
     state_name = STATE_LIST[state_label]
     if state_name == "White Coat (harmless)":
         return 0.6
@@ -791,33 +988,20 @@ def state_noise_multiplier(state_label):
                         "Stroke (crisis)"]:
         return 2.0
     else:
-        return 0.8  # e.g. Neutral
+        return 0.8
 
 def get_noise_std(vital, state_label, phase=None):
-    """
-    Overall standard deviation for the given vital & state.
-    """
     base = noise_for_vital(vital)
     if STATE_LIST[state_label] == "Death":
-        # We'll fade to 0 noise in fade_out_death, but for early Death rows we can keep normal noise
         return base
     else:
         multiplier = state_noise_multiplier(state_label)
         return base * multiplier
 
-#########################################
-# 9. SMOOTHING STATE TRANSITIONS
-#########################################
-
 def smooth_vitals_transitions(df, min_window=60, max_window=240, debug=False):
-    """
-    S-curve interpolation of old->new state for the first portion 
-    of each new state block. Also blends old noise -> new noise.
-    """
     df = df.copy()
     original_df = df.copy()
-    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp",
-                   "respiratory_rate", "oxygen_saturation"]
+    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]
     transition_idxs = df.index[df["state_label"].diff().fillna(0) != 0].tolist()
     
     for t_idx in transition_idxs:
@@ -850,126 +1034,69 @@ def smooth_vitals_transitions(df, min_window=60, max_window=240, debug=False):
                     break
                 new_val = original_df.loc[idx, col]
                 new_std = get_noise_std(col, new_state)
-                
                 alpha_lin = offset / float(window_length)
                 if alpha_lin > 1.0:
                     alpha_lin = 1.0
                 alpha_s = s_curve(alpha_lin, steepness=5.0)
-                
-                # blend old_val->new_val
                 base_value = (1 - alpha_s)*old_val + alpha_s*new_val
-                # blend old_std->new_std
                 current_std = (1 - alpha_s)*old_std + alpha_s*new_std
-
                 noisy_val = base_value + np.random.normal(0, current_std)
                 df.at[idx, col] = noisy_val
-                old_val = noisy_val  # for continuity
-    
+                old_val = noisy_val
     return df
 
-#########################################
-# 9B. Ensure continuous noise in non-Death states
-#########################################
-
 def apply_continuous_noise(df):
-    """
-    After smoothing, ensure we never have a truly flat line in any state except 
-    Death or Bathroom. We add a small random perturbation to each row based on 
-    the state's normal noise level.
-    """
     df = df.copy()
-    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp",
-                   "respiratory_rate", "oxygen_saturation"]
+    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]
     for idx, row in df.iterrows():
         st = row["state_label"]
-        # skip Death (16) and Bathroom(9)
         if st in [9, 16]:
             continue
         for col in vital_signs:
             base_val = df.at[idx, col]
-            # Use maybe half the typical std so we don't overshadow the smoothing:
             extra_std = get_noise_std(col, st) * 0.5
             df.at[idx, col] = base_val + np.random.normal(0, extra_std)
     return df
 
-#########################################
-# 9C. Fade Death to zero after ~20min
-#########################################
-
 def fade_out_death(df, rows_to_fade=240):
-    """
-    For any patient that hits Death state, from the first row of Death onward,
-    do a 20-min ramp (rows_to_fade) from the current value/noise to zero. 
-    After that, clamp to zero.
-    """
     df = df.copy()
-    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp",
-                   "respiratory_rate", "oxygen_saturation"]
-    
-    # Find rows where state_label == 16 (Death)
+    vital_signs = ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]
     death_idxs = df.index[df["state_label"] == 16].tolist()
     if not death_idxs:
-        return df  # no death state
-    
-    dstart = death_idxs[0]  # first row of Death
-    # Because the patient might remain in Death for many rows,
-    # we fade from [dstart..dstart+rows_to_fade) to zero with an S-curve
-    # then clamp subsequent rows at zero.
-    
-    # store the old baseline at dstart-1 if possible
+        return df
+    dstart = death_idxs[0]
     if dstart > df.index[0]:
         old_idx = dstart - 1
     else:
         old_idx = dstart
     for col in vital_signs:
         old_val = df.loc[old_idx, col]
-        # We'll keep some noise at the beginning (like you said),
-        # then fade to zero amplitude as well.
         old_std = get_noise_std(col, 16)
-        
-        # Phase 1: ramp to zero
         for offset in range(rows_to_fade):
             idx = dstart + offset
             if idx not in df.index:
                 break
             alpha_lin = offset / float(rows_to_fade)
             alpha_s = s_curve(alpha_lin, steepness=5.0)
-            base_value = (1 - alpha_s)*old_val  # new_val=0
-            # also fade noise from old_std -> 0
+            base_value = (1 - alpha_s)*old_val
             current_std = (1 - alpha_s)*old_std
             val = base_value + np.random.normal(0, current_std)
             df.at[idx, col] = max(val, 0.0)
-        
-        # Phase 2: clamp to zero after the fade
         clamp_start = dstart + rows_to_fade
         for idx2 in range(clamp_start, df.index[-1] + 1):
             if idx2 in df.index:
                 if df.loc[idx2, "state_label"] == 16:
                     df.at[idx2, col] = 0.0
                 else:
-                    # if state changed from Death to something else (rare?), break
                     break
     return df
 
-#########################################
-# 10. INTERACTIVE PLOTTING FUNCTION & STATE LABELS
-#########################################
-
 def simplify_state_labels(df):
-    """
-    Map the detailed state labels into 4 output states:
-      0: Neutral, Bathroom (harmless), White Coat (harmless)
-      1: Warning states (Cardiac Ischaemia, Sepsis, Acute Anxiety/Panic,
-         Breathing Difficulty, Hypovolaemia, Arrhythmic Flare, Hypoglycemia, TIA)
-      2: Crisis states (STEMI (crisis), Septic Shock (crisis), Compromised Airway (crisis),
-         Haemorrhagic Shock (crisis), Stroke (crisis))
-      3: Death
-    """
     mapping = {
-        0: 0,   # Neutral
-        9: 0,   # Bathroom (harmless)
-        10: 0,  # White Coat (harmless)
-        1: 1,   # Warning states:
+        0: 0,
+        9: 0,
+        10: 0,
+        1: 1,
         2: 1,
         3: 1,
         4: 1,
@@ -977,40 +1104,32 @@ def simplify_state_labels(df):
         6: 1,
         7: 1,
         8: 1,
-        11: 2,  # Crisis states:
+        11: 2,
         12: 2,
         13: 2,
         14: 2,
         15: 2,
-        16: 3   # Death
+        16: 3
     }
     df["state_label"] = df["state_label"].map(mapping)
     return df
 
-
 def interactive_patient_plot(df):
-    # Limit to first 10 patients
-    unique_patients = np.sort(df['patient_id'].unique())[:10]  # Added slice here
+    unique_patients = np.sort(df['patient_id'].unique())[:10]
     initial_patient = unique_patients[0]
-    
     fig, ax = plt.subplots(figsize=(12, 6))
     plt.subplots_adjust(bottom=0.25)
     patient_df = df[df['patient_id'] == initial_patient].copy()
     patient_df['timestamp'] = pd.to_datetime(patient_df['timestamp'])
-    
     lines = {}
     for vital in ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]:
         line, = ax.plot(patient_df['timestamp'], patient_df[vital], label=vital)
         lines[vital] = line
-    
     ax.set_title(f'Patient {initial_patient}')
     ax.legend(loc='upper right')
     ax.grid(True)
-    
     ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
-    slider = Slider(ax_slider, 'Patient Index', 0, len(unique_patients)-1,  # This will now max out at 9
-                    valinit=0, valfmt='%0.0f')
-    
+    slider = Slider(ax_slider, 'Patient Index', 0, len(unique_patients)-1, valinit=0, valfmt='%0.0f')
     def update(val):
         idx = int(slider.val)
         pid = unique_patients[idx]
@@ -1023,37 +1142,31 @@ def interactive_patient_plot(df):
         ax.autoscale_view()
         ax.set_title(f'Patient {pid}')
         fig.canvas.draw_idle()
-    
     slider.on_changed(update)
     plt.show()
 
-#########################################
-# 11. MAIN FUNCTION: SIMULATION, OUTPUT, AND PLOTTING
-#########################################
-
+##########################################################
+# MAIN FUNCTION: VITAL SIGNS & ECG SIMULATION
+##########################################################
 def main():
-    print("Starting vital signs simulation...")
+    print("Starting vital signs simulation and ECG generation...")
     
-    # 1) Generate the raw data
-    df_enc = load_encounters("train_final_ed_patients.csv")
+    # 1) Generate vital sign data for each patient
+    df_enc = load_encounters("test_final_ed_patients.csv")
     base_time = datetime(2025, 1, 1, 19, 0, 0)
-    # Remove previous output file if it exists
     output_csv = "vitals.csv"
     if os.path.exists(output_csv):
         os.remove(output_csv)
-    
     generator = VitalSignsGenerator(seed=42)
     patient_master = load_patient_master_data()
-    patient_matrices_raw = create_patient_specific_matrices(
-        basis_transition_matrix_comb, patient_master, MASTER_SPEC, state_mapping
-    )
+    patient_matrices_raw = create_patient_specific_matrices(basis_transition_matrix_comb, patient_master, MASTER_SPEC, state_mapping)
     patient_matrices = {pid: normalize_matrix(mat) for pid, mat in patient_matrices_raw.items()}
     
-    # Process each patient one-by-one:
+    # Process each patient
     for i, row in df_enc.iterrows():
         pid = row.get("PATIENT", f"Unknown_{i}")
         reason = row.get("REASONDESCRIPTION", "")
-        pain = row.get("Pain severity - 0-10 verbal numeric rating [Score] - Reported", "0")
+        pain = row.get("Pain severity - 0-10 verbal numeric rating [Score]", "0")
         hist = row.get("PREVIOUS_MEDICAL_HISTORY", "")
         proc = row.get("PREVIOUS_MEDICAL_PROCEDURES", "")
     
@@ -1073,29 +1186,24 @@ def main():
     
         modded = apply_modifiers(pbaseline, reason, pain, None, None, None)
         start_t = base_time + timedelta(hours=i)
-        df = generator.generate_patient_series(
-            patient_baseline=modded,
-            duration_minutes=240,
-            interval_seconds=5,
-            start_time=start_t
-        )
+        df = generator.generate_patient_series(patient_baseline=modded, duration_minutes=240, interval_seconds=5, start_time=start_t)
     
         pconds = parse_conditions_from_history(hist, proc)
         df = apply_condition_baseline(df, pconds)
     
         trans_matrix = patient_matrices.get(pid, normalize_matrix(basis_transition_matrix))
-        states_seq_str = simulate_patient_states(pid, trans_matrix, debug=True)
-        states_seq = [STATE_LIST.index(state) for state in states_seq_str]
-        df["state_label"] = states_seq
-        print(f"Patient {pid} state sequence: {states_seq}")
+        # Generate state sequence (unsimplified labels are needed for ECG)
+        states_seq_str = build_markov_states(len(df), trans_matrix, initial_idx=0)
+        df["state_label"] = states_seq_str
+        print(f"Patient {pid} state sequence: {states_seq_str}")
     
-        # Apply warning/crisis offsets row-by-row:
+        # Apply warning/crisis modifications
         npts = len(df)
         for idx in range(npts):
-            st = states_seq[idx]
+            st = states_seq_str[idx]
             if 1 <= st <= 8:
                 wname = STATE_LIST[st]
-                wdict = WARNING_STATES[wname]
+                wdict = WARNING_STATES.get(wname, {})
                 if "HR_factor_range" in wdict:
                     fmin, fmax = wdict["HR_factor_range"]
                     factor = np.random.uniform(fmin, fmax)
@@ -1119,7 +1227,7 @@ def main():
                     df.at[idx, "oxygen_saturation"] += o2off
             elif 11 <= st <= 15:
                 cname = STATE_LIST[st]
-                cdict = CRISIS_STATES[cname]
+                cdict = CRISIS_STATES.get(cname, {})
                 if "HR_factor_range" in cdict:
                     fmin, fmax = cdict["HR_factor_range"]
                     factor = np.random.uniform(fmin, fmax)
@@ -1148,8 +1256,8 @@ def main():
                 df.at[idx, "systolic_bp"] += 10
                 df.at[idx, "diastolic_bp"] += 6
     
-        if 16 in states_seq:
-            died_idx = [index for index, state in enumerate(states_seq) if state == 16]
+        if 16 in states_seq_str:
+            died_idx = [i for i, state in enumerate(states_seq_str) if state == 16]
             if died_idx:
                 dstart = died_idx[0]
                 df.loc[dstart:, ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]] = 0
@@ -1161,26 +1269,32 @@ def main():
         df = df[["timestamp", "patient_id", "diastolic_bp", "systolic_bp", "heart_rate",
                  "respiratory_rate", "oxygen_saturation", "state_label"]]
     
-        # 2) Smooth transitions for this patient
-        df_smoothed = smooth_vitals_transitions(df)
-        df_smoothed = apply_continuous_noise(df_smoothed)   # if defined
-        df_smoothed = fade_out_death(df_smoothed, rows_to_fade=240)  # if defined
-        df_smoothed = simplify_state_labels(df_smoothed)
-
-        # Round all vital sign columns to one decimal place
-        vital_columns = ["heart_rate", "systolic_bp", "diastolic_bp", "respiratory_rate", "oxygen_saturation"]
-        for col in vital_columns:
-            df_smoothed[col] = df_smoothed[col].round(1)
-    
-        # 3) Append this patient's smoothed data to CSV
+        # Append unsmoothed, unsimplified data (needed for ECG generation)
         if not os.path.exists(output_csv):
-            df_smoothed.to_csv(output_csv, index=False)
+            df.to_csv(output_csv, index=False)
         else:
-            df_smoothed.to_csv(output_csv, mode='a', header=False, index=False)
+            df.to_csv(output_csv, mode='a', header=False, index=False)
+
+        # Get ECG base parameters from your existing function
+        base_p = base_ecg_params()
+
+        # Now, immediately generate ECG data for this patient and append it:
+        ecg_csv = "ecg_data.csv"
+        generate_ecg_for_patient(df, pid, base_p, ecg_csv, prev_params=None)
+        
+    print("Vital signs simulation complete.")
+
+    # (Optional) Smooth and simplify the vitals data for plotting.
+    df_vitals = pd.read_csv(output_csv)
+    df_vitals['timestamp'] = pd.to_datetime(df_vitals['timestamp'])
+    df_smoothed = smooth_vitals_transitions(df_vitals)
+    df_smoothed = apply_continuous_noise(df_smoothed)
+    df_smoothed = fade_out_death(df_smoothed, rows_to_fade=240)
+    df_smoothed = simplify_state_labels(df_smoothed)
+    df_smoothed.to_csv(output_csv, index=False)
     
-    print("Done! Wrote 'vitals.csv' with patient-specific state transitions.")
-    interactive_patient_plot(df_smoothed)  # (or re-read the file if needed)
+    print("Done! Vitals and ECG data generated.")
+    interactive_patient_plot(df_smoothed)
     
 if __name__ == "__main__":
     main()
-
